@@ -7,15 +7,6 @@
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
    the Free Software Foundation; version 2 of the License.
-
-   This program is distributed in the hope that it will be useful,
-   but WITHOUT ANY WARRANTY; without even the implied warranty of
-   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-   GNU General Public License for more details.
-
-   You should have received a copy of the GNU General Public License
-   along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
 */
 
 #ifdef USE_PRAGMA_INTERFACE
@@ -26,9 +17,10 @@
 #include "thr_lock.h"
 #include "handler.h"
 #include "my_base.h"
+#include "select_handler.h"
 #include <string>
 
-// Forward declare DuckDB types to avoid including headers here
+// Forward declare DuckDB types
 namespace duckdb {
     class Connection;
     class DuckDB;
@@ -38,19 +30,17 @@ namespace duckdb {
 /**
   @brief
   DuckDB_share is shared among all open handlers for the same table.
-  It owns the DuckDB database instance (and therefore the on-disk file).
+  The actual DuckDB database instance is managed by the global registry
+  in ha_duckdb.cc, keyed by database file path.
 */
 class DuckDB_share : public Handler_share {
 public:
   mysql_mutex_t mutex;
   THR_LOCK lock;
-  duckdb::DuckDB* db_instance;
+  std::string db_file_path;    // path to #duckdb/<db>.duckdb
 
   DuckDB_share();
   ~DuckDB_share();
-
-  int init_database(const char *path);
-  void cleanup_database();
 };
 
 /**
@@ -67,13 +57,17 @@ class ha_duckdb: public handler
   duckdb::MaterializedQueryResult* scan_result;
   size_t scan_row;
 
-  // Per-open metadata
-  std::string db_path;
-  std::string duckdb_table_name;
+  // Per-open metadata (public so create_duckdb_select_handler can read them)
+public:
+  std::string db_file_path;
+  std::string db_name;
+  std::string duckdb_table_name;    // schema-qualified: db.table
+private:
 
   DuckDB_share *get_share();
+  int convert_row_from_duckdb(uchar *buf, size_t row_idx,
+                               duckdb::MaterializedQueryResult *result);
   std::string build_create_sql(TABLE *table_arg);
-  int convert_row_from_duckdb(uchar *buf, size_t row_idx);
 
 public:
   ha_duckdb(handlerton *hton, TABLE_SHARE *table_arg);
@@ -84,30 +78,25 @@ public:
 
   const char **bas_ext() const;
 
-  // Table operations
   int open(const char *name, int mode, uint test_if_locked);
   int close(void);
   int create(const char *name, TABLE *table_arg, HA_CREATE_INFO *create_info);
   int delete_table(const char *name);
   int rename_table(const char *from, const char *to);
 
-  // Row operations
   int write_row(const uchar *buf);
   int update_row(const uchar *old_data, const uchar *new_data);
   int delete_row(const uchar *buf);
 
-  // Scan operations
   int rnd_init(bool scan);
   int rnd_end();
   int rnd_next(uchar *buf);
   int rnd_pos(uchar *buf, uchar *pos);
   void position(const uchar *record);
 
-  // Lock management
   THR_LOCK_DATA **store_lock(THD *thd, THR_LOCK_DATA **to,
                              enum thr_lock_type lock_type);
 
-  // Statistics and info
   int info(uint flag);
   ha_rows records_in_range(uint inx, const key_range *min_key,
                            const key_range *max_key, page_range *res);
@@ -117,10 +106,7 @@ public:
     return (HA_REC_NOT_IN_SEQ | HA_NO_BLOBS | HA_BINLOG_STMT_CAPABLE);
   }
 
-  ulong index_flags(uint inx, uint part, bool all_parts) const
-  {
-    return 0;
-  }
+  ulong index_flags(uint inx, uint part, bool all_parts) const { return 0; }
 
   uint max_supported_record_length() const { return HA_MAX_REC_LENGTH; }
   uint max_supported_keys()          const { return 0; }
@@ -134,6 +120,27 @@ public:
     cost.cpu= 0;
     return cost;
   }
+};
+
+/**
+  @brief
+  Pushdown handler — intercepts a full SELECT and runs it in DuckDB,
+  bypassing MariaDB's row-by-row rnd_next() loop entirely.
+*/
+class ha_duckdb_select_handler : public select_handler
+{
+  duckdb::Connection *connection;
+  duckdb::MaterializedQueryResult *result;
+  size_t current_row;
+
+public:
+  ha_duckdb_select_handler(THD *thd, SELECT_LEX *sel,
+                           duckdb::Connection *conn);
+  ~ha_duckdb_select_handler();
+
+  int init_scan()  override;
+  int next_row()   override;
+  int end_scan()   override;
 };
 
 #endif /* HA_DUCKDB_INCLUDED */

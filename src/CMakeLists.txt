@@ -35,6 +35,7 @@ include_directories(
   ${MARIADB_SOURCE_DIR}/include/providers
   ${MARIADB_SOURCE_DIR}/include
   ${MARIADB_SOURCE_DIR}/sql
+  ${MARIADB_BUILD_DIR}/sql
   ${DUCKDB_DIR}                         # duckdb.hpp, duckdb.h
 )
 
