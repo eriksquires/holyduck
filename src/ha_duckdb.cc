@@ -38,6 +38,72 @@ struct DuckDBEntry {
 static std::map<std::string, DuckDBEntry> g_duckdb_registry;
 static mysql_mutex_t g_duckdb_mutex;
 
+// ---------------------------------------------------------------------------
+// MariaDB-compatibility SQL macros
+// Installed once per DuckDB file so that pushed-down queries using
+// MariaDB datetime/string function names work transparently in DuckDB.
+// Uses CREATE OR REPLACE MACRO so re-opening the file after an upgrade
+// always refreshes the definitions.
+// ---------------------------------------------------------------------------
+static void install_mariadb_compat_macros(duckdb::DuckDB *db)
+{
+  duckdb::Connection conn(*db);
+
+  // Each entry is a complete CREATE OR REPLACE MACRO statement.
+  static const char *macros[]= {
+    // -----------------------------------------------------------------------
+    // Date/time formatting
+    // -----------------------------------------------------------------------
+    // MariaDB: DATE_FORMAT(date, format)
+    // DuckDB:  strftime(format, timestamp)  — argument order is reversed
+    "CREATE OR REPLACE MACRO date_format(d, fmt) AS strftime(fmt, d::TIMESTAMP)",
+
+    // MariaDB: STR_TO_DATE(str, format)
+    // NOTE: DuckDB's strptime() requires a constant format string — a
+    // parameterised macro cannot satisfy that.  STR_TO_DATE is therefore not
+    // pushed down; MariaDB evaluates it on the server side instead.
+
+    // -----------------------------------------------------------------------
+    // Unix epoch conversions
+    // -----------------------------------------------------------------------
+    // MariaDB: UNIX_TIMESTAMP(datetime)  →  seconds since epoch
+    // epoch() is a DuckDB built-in; safe in macro bodies even though
+    // MariaDB would reject it in direct SQL.
+    // NOTE: do NOT register a 0-arg unix_timestamp() — DuckDB v1.0 does not
+    // support macro overloading by arity, and a 0-arg macro would shadow
+    // this 1-arg one.  MariaDB evaluates UNIX_TIMESTAMP() itself anyway.
+    "CREATE OR REPLACE MACRO unix_timestamp(d) AS epoch(d::TIMESTAMP)::BIGINT",
+
+    // MariaDB: FROM_UNIXTIME(n)  →  DATETIME from epoch seconds
+    // make_timestamp() takes microseconds; multiply seconds by 1_000_000
+    "CREATE OR REPLACE MACRO from_unixtime(n) AS make_timestamp(n::BIGINT * 1000000)",
+
+    // -----------------------------------------------------------------------
+    // Date arithmetic helpers
+    // -----------------------------------------------------------------------
+    // MariaDB: LAST_DAY(date)  →  last day of that month
+    "CREATE OR REPLACE MACRO last_day(d) AS "
+    "(date_trunc('month', d::DATE) + INTERVAL 1 MONTH - INTERVAL 1 DAY)::DATE",
+
+    // MariaDB: PERIOD_DIFF(p1, p2)  →  months between YYYYMM periods
+    // Not a clean single-expression macro; skip for now.
+
+    // -----------------------------------------------------------------------
+    // Numeric / general
+    // -----------------------------------------------------------------------
+    // MariaDB: IF(cond, true_val, false_val)
+    "CREATE OR REPLACE MACRO if(cond, a, b) AS CASE WHEN cond THEN a ELSE b END",
+  };
+
+  for (const char *sql : macros)
+  {
+    auto r= conn.Query(sql);
+    if (r->HasError())
+      sql_print_warning("DuckDB: failed to install compat macro: %s — %s",
+                        sql, r->GetError().c_str());
+  }
+}
+
 static duckdb::DuckDB *registry_get(const std::string &path)
 {
   mysql_mutex_lock(&g_duckdb_mutex);
@@ -56,6 +122,7 @@ static duckdb::DuckDB *registry_get(const std::string &path)
     if (duckdb_max_threads > 0)
       config.options.maximum_threads= duckdb_max_threads;
     db= new duckdb::DuckDB(path.c_str(), &config);
+    install_mariadb_compat_macros(db);
   }
   catch (const std::exception &e)
   {
