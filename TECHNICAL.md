@@ -20,32 +20,19 @@
 - `DELETE ... WHERE` — direct pushdown: `DELETE FROM table WHERE pushed_where`
 
 ### Query Pushdown
-- **Full SELECT pushdown** via `ha_duckdb_select_handler`: GROUP BY, SUM, COUNT, AVG,
-  ORDER BY executed entirely inside DuckDB when all tables in the query are DUCKDB engine.
-  EXPLAIN shows `PUSHED SELECT` with all-NULL access details.
-- **UNION / INTERSECT / EXCEPT pushdown** via `create_unit`: When all SELECT arms reference
-  only DUCKDB tables, the entire set operation runs inside DuckDB.
-  EXPLAIN shows `PUSHED UNION`. Includes `UNION ALL` and deduplicating `UNION`.
-- **Derived table / CTE pushdown** via `create_derived`: When a subquery in the FROM clause
-  (or a CTE) references only DUCKDB tables, it runs entirely inside DuckDB before the result
-  is returned to MariaDB.  This gives us an opportunity for performance tuning multi-engine joins:
 
-**Solution:**  pre-aggregate DuckDB data in a CTE or subquery, then join the small result with InnoDB.
+HolyDuck implements three pushdown paths. EXPLAIN output tells you which fired:
 
-  ```sql
-  WITH agg AS (
-      SELECT sensor_id, AVG(val) AS avg_val FROM duckdb_metrics GROUP BY sensor_id
-  )
-  SELECT s.name, a.avg_val FROM innodb_sensors s JOIN agg a ON s.id = a.sensor_id;
-  ```
+| EXPLAIN output | When it fires | What runs in DuckDB |
+|---|---|---|
+| `PUSHED SELECT` | All tables in query are DUCKDB | Entire SELECT including GROUP BY, ORDER BY |
+| `PUSHED UNION` | All arms of UNION/INTERSECT/EXCEPT are DUCKDB | Entire set operation |
+| `PUSHED DERIVED` | CTE or subquery references only DUCKDB tables | Entire CTE/subquery |
 
-Alternatively, put both tables in DuckDB. 
+For mixed-engine queries where pushdown cannot fire on the full query, two optimizations still apply:
 
-- **Condition pushdown** via `cond_push()`: For cross-engine joins, WHERE conditions are pushed
-  into the DuckDB scan query.
-
-- **Column subset scan**: For cross-engine joins, `rnd_init()` reads `table->read_set` and emits
-  `SELECT col1, col2` instead of `SELECT *`, reducing data transfer.
+- **Condition pushdown** via `cond_push()`: WHERE conditions are pushed into the DuckDB scan query, filtering rows before they reach MariaDB.
+- **Column subset scan**: `rnd_init()` reads `table->read_set` and emits `SELECT col1, col2` instead of `SELECT *`, reducing data transfer.
 
 ### Concurrency
 - Write locks upgraded to `TL_WRITE` in `store_lock()` — MariaDB serializes concurrent writers
@@ -58,7 +45,7 @@ Macros installed into DuckDB at startup translate MariaDB function names:
 - `DATE_FORMAT`, `UNIX_TIMESTAMP`, `FROM_UNIXTIME`, `LAST_DAY`
 - `LOCATE`, `MID`, `SPACE`, `STRCMP`, `REGEXP_SUBSTR`, `FIND_IN_SET`
 - `IF`
-- `RoundDateTime(dt, bucket_secs)` — wraps DuckDB's native `time_bucket()` for time bucketing. This feature is one the author alone uses but we leave it for you too. 
+- `RoundDateTime(dt, bucket_secs)` — wraps DuckDB's native `time_bucket()` for time bucketing
 - `CHAR(n)` rewritten to `chr(n)` in the SQL rewrite pass
 - `<cache>(expr)` wrappers from MariaDB's AST printer stripped automatically
 
@@ -77,15 +64,104 @@ Macros live in `sql/duckdb_mariadb_compat.sql` — edit and redeploy without rec
 | DATETIME, TIMESTAMP | TIMESTAMP |
 | VARCHAR, TEXT, BLOB, etc. | VARCHAR |
 
-### Cross-Engine Joins
-MariaDB can join DUCKDB tables with InnoDB tables. The optimizer uses `type=ALL` for the
-DuckDB table (intentional — see Architecture below) and `eq_ref` for InnoDB lookups.
-Condition pushdown reduces the rows DuckDB returns before the join, but it cannot filter based on joins with outside tables.  
+---
+
+## Writing Queries for HolyDuck
+
+The most important thing to understand about mixed-engine queries: **MariaDB cannot push
+aggregations across engine boundaries**. If your query joins a DuckDB table directly against
+an InnoDB table and groups the result, MariaDB scans every DuckDB row and does the GROUP BY
+itself. For large DuckDB tables this is the difference between milliseconds and minutes.
+
+The solution is to restructure the query so the heavy DuckDB work happens in a CTE or
+subquery first — then `PUSHED DERIVED` fires and the entire aggregation runs inside DuckDB,
+returning a small result for MariaDB to join against InnoDB.
+
+### Example: Sales Analysis
+
+Suppose you have:
+- `sales` — DuckDB table, millions of rows (order_id, product_id, category_id, region_id, amount, ts)
+- `categories` — InnoDB table, small (id, name)
+- `regions` — InnoDB table, small (id, name)
+
+**Naive query — slow:**
+
+```sql
+SELECT c.name AS category,
+       r.name AS region,
+       SUM(s.amount) AS total_sales,
+       COUNT(*) AS order_count
+FROM sales s
+JOIN categories c ON s.category_id = c.id
+JOIN regions r ON s.region_id = r.id
+WHERE s.ts BETWEEN '2026-01-01' AND '2026-03-31'
+GROUP BY c.name, r.name
+ORDER BY total_sales DESC;
+```
+
+What happens: MariaDB scans all matching rows from `sales` (potentially millions after the date
+filter), streams them to the join, then performs the GROUP BY. DuckDB returns raw rows instead
+of aggregated results.
+
+**Optimized with CTE — fast:**
+
+```sql
+WITH sales_summary AS (
+    SELECT category_id,
+           region_id,
+           SUM(amount) AS total_sales,
+           COUNT(*) AS order_count
+    FROM sales
+    WHERE ts BETWEEN '2026-01-01' AND '2026-03-31'
+    GROUP BY category_id, region_id
+)
+SELECT c.name AS category,
+       r.name AS region,
+       ss.total_sales,
+       ss.order_count
+FROM sales_summary ss
+JOIN categories c ON ss.category_id = c.id
+JOIN regions r ON ss.region_id = r.id
+ORDER BY ss.total_sales DESC;
+```
+
+What happens: `PUSHED DERIVED` fires on `sales_summary`. DuckDB scans `sales`, applies the
+date filter, and returns one row per (category_id, region_id) pair — perhaps 50 rows for
+5 categories × 10 regions. MariaDB joins those 50 rows against the small InnoDB tables.
+
+Verify with EXPLAIN:
+
+```sql
+EXPLAIN WITH sales_summary AS (
+    SELECT category_id, region_id, SUM(amount) AS total_sales, COUNT(*) AS order_count
+    FROM sales WHERE ts BETWEEN '2026-01-01' AND '2026-03-31'
+    GROUP BY category_id, region_id
+)
+SELECT c.name, r.name, ss.total_sales
+FROM sales_summary ss
+JOIN categories c ON ss.category_id = c.id
+JOIN regions r ON ss.region_id = r.id\G
+```
+
+Look for `select_type: PUSHED DERIVED` — that confirms DuckDB is doing the work.
+
+### The General Rule
+
+Whenever you have a large DuckDB table joining against InnoDB:
+
+1. Move all DuckDB scanning, filtering, and aggregation into a CTE
+2. Join the CTE result (small) against InnoDB (also small)
+3. MariaDB only touches small row counts on both sides
+
+This pattern works for any depth of aggregation — daily buckets, percentiles, window functions,
+`RoundDateTime` time bucketing — as long as the CTE references only DuckDB tables.
+
+---
 
 ## Architecture
 
 ```
-[Client / DBeaver]
+[Client / DBeaver / R / Python]
        │
        ▼
 [MariaDB 11.8.3]  ← standard SQL interface
@@ -118,14 +194,20 @@ index scans against DuckDB tables. This is deliberate:
 `ALTER TABLE MODIFY COLUMN` (type changes) are not supported via inplace ALTER.
 The safe pattern is: add new column → populate it → drop old column → rename new column.
 
+---
+
 ## Known Limitations
 
 | Area | Status |
 |---|---|
 | Column type changes | Not supported — use add/populate/rename/drop pattern |
 | `INSERT ... ON DUPLICATE KEY UPDATE` | Not supported |
-| Aggregation pushdown (cross-engine) | Aggregations run in MariaDB; workaround: wrap DuckDB aggregation in a CTE or subquery |
+| Aggregation pushdown (cross-engine) | Use CTE pattern above — `PUSHED DERIVED` handles it |
 | Bulk INSERT constraint errors | Returns error 1030 instead of 1022 (batch rejected, correct behavior) |
+| High availability / replication | Not supported — single node only |
+| Multiple concurrent writers | Single writer at a time (DuckDB limitation) |
+
+---
 
 ## Repository Layout
 
