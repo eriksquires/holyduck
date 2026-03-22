@@ -775,7 +775,7 @@ int ha_duckdb_select_handler::end_scan()
 struct st_mysql_storage_engine duckdb_storage_engine=
 { MYSQL_HANDLERTON_INTERFACE_VERSION };
 
-mysql_declare_plugin(duckdb)
+maria_declare_plugin(duckdb)
 {
   MYSQL_STORAGE_ENGINE_PLUGIN,
   &duckdb_storage_engine,
@@ -788,7 +788,7 @@ mysql_declare_plugin(duckdb)
   0x0100,
   NULL,
   NULL,
-  NULL,
-  0,
+  "1.0",
+  MariaDB_PLUGIN_MATURITY_STABLE,
 }
-mysql_declare_plugin_end;
+maria_declare_plugin_end;

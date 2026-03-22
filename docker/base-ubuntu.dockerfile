@@ -55,8 +55,7 @@ RUN echo "[mysqld]" > /etc/mysql/mariadb.conf.d/50-server.cnf \
 && echo "bind-address = 0.0.0.0" >> /etc/mysql/mariadb.conf.d/50-server.cnf \
 && echo "port = 3306" >> /etc/mysql/mariadb.conf.d/50-server.cnf \
 && echo "innodb_buffer_pool_size = 512M" >> /etc/mysql/mariadb.conf.d/50-server.cnf \
-&& echo "max_connections = 100" >> /etc/mysql/mariadb.conf.d/50-server.cnf \
-&& echo "plugin_maturity = unknown" >> /etc/mysql/mariadb.conf.d/50-server.cnf
+&& echo "max_connections = 100" >> /etc/mysql/mariadb.conf.d/50-server.cnf
 
 # Create workspace directories
 WORKDIR /workspace
