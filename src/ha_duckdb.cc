@@ -1345,7 +1345,14 @@ THR_LOCK_DATA **ha_duckdb::store_lock(THD *, THR_LOCK_DATA **to,
                                       enum thr_lock_type lock_type)
 {
   if (lock_type != TL_IGNORE && lock.type == TL_UNLOCK)
+  {
+    // Upgrade any write lock to TL_WRITE: serializes concurrent writers
+    // since DuckDB only supports one writer at a time. Readers are briefly
+    // blocked during writes, which is acceptable given writes are infrequent.
+    if (lock_type >= TL_WRITE_ALLOW_WRITE)
+      lock_type= TL_WRITE;
     lock.type= lock_type;
+  }
   *to++= &lock;
   return to;
 }
