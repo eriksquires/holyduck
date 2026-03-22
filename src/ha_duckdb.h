@@ -19,6 +19,7 @@
 #include "my_base.h"
 #include "select_handler.h"
 #include <string>
+#include <vector>
 
 // Forward declare DuckDB types
 namespace duckdb {
@@ -60,6 +61,13 @@ class ha_duckdb: public handler
   // Bulk insert state — Appender kept open across write_row() calls
   // Stored as void* to avoid needing full duckdb.hpp in the header
   void* bulk_appender;
+
+  // Condition pushdown — set by cond_push(), used in rnd_init()
+  std::string pushed_where;
+
+  // Column subset for scans — maps DuckDB result column index → MariaDB
+  // field index.  Empty means SELECT * (all fields, sequential mapping).
+  std::vector<uint> scan_field_map;
 
   // Per-open metadata (public so create_duckdb_select_handler can read them)
 public:
@@ -109,10 +117,13 @@ public:
   ha_rows records_in_range(uint inx, const key_range *min_key,
                            const key_range *max_key, page_range *res);
 
+  const COND *cond_push(const COND *cond) override;
+  void        cond_pop()                  override;
+
   ulonglong table_flags() const
   {
     return (HA_REC_NOT_IN_SEQ | HA_NO_BLOBS | HA_BINLOG_STMT_CAPABLE |
-            HA_NULL_IN_KEY);
+            HA_NULL_IN_KEY | HA_CAN_TABLE_CONDITION_PUSHDOWN);
   }
 
   ulong index_flags(uint inx, uint part, bool all_parts) const

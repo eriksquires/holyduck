@@ -25,6 +25,9 @@ extern char opt_plugin_dir[];        // absolute path to plugin directory
 // Forward declare sysvar so registry_get() can reference it
 static ulong duckdb_max_threads;
 
+// Forward declare rewrite pass so cond_push() can use it
+static std::string rewrite_mariadb_sql(const std::string &sql);
+
 // ---------------------------------------------------------------------------
 // Global DuckDB instance registry
 //
@@ -678,16 +681,99 @@ int ha_duckdb::delete_row(const uchar *)
 // Scan operations
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Condition pushdown
+// ---------------------------------------------------------------------------
+
+const COND *ha_duckdb::cond_push(const COND *cond)
+{
+  // Serialize the condition to SQL using MariaDB's own printer, then apply
+  // the same rewrite passes used for pushed-down SELECT queries.
+  String str;
+  const_cast<COND *>(cond)->print(&str, QT_ORDINARY);
+  std::string where(str.ptr(), str.length());
+  for (char &c : where)
+    if (c == '`') c = '"';
+  where= rewrite_mariadb_sql(where);
+
+  // Strip any remaining two-part "alias"."col" → "col" qualifiers.
+  // cond_push() delivers a predicate for THIS table only, so column refs
+  // like "s"."sale_date" are meaningless to DuckDB's single-table query.
+  // strip_db_qualifier() already reduced three-part refs; here we drop the
+  // leading "alias". from any remaining two-part refs.
+  {
+    std::string out;
+    out.reserve(where.size());
+    size_t i= 0, n= where.size();
+    while (i < n)
+    {
+      if (where[i] != '"') { out += where[i++]; continue; }
+      // Read p1 (quoted identifier)
+      size_t p1s= i++;
+      while (i < n && where[i] != '"') i++;
+      if (i < n) i++;           // closing "
+      size_t p1e= i;
+      // If followed by ."  it's a two-part ref — drop the qualifier
+      if (i < n && where[i] == '.' && i + 1 < n && where[i + 1] == '"')
+      {
+        i++;                    // skip '.'
+        // p2 — keep only this part
+        out += where[i];        // opening "
+        i++;
+        while (i < n && where[i] != '"') out += where[i++];
+        if (i < n) { out += where[i++]; }  // closing "
+      }
+      else
+      {
+        out += where.substr(p1s, p1e - p1s);
+      }
+    }
+    where= out;
+  }
+
+  pushed_where= where;
+  return nullptr;  // we handle the entire condition
+}
+
+void ha_duckdb::cond_pop()
+{
+  pushed_where.clear();
+}
+
+// ---------------------------------------------------------------------------
+// Full-table scan
+// ---------------------------------------------------------------------------
+
 int ha_duckdb::rnd_init(bool scan)
 {
   DBUG_ENTER("ha_duckdb::rnd_init");
   if (!connection) DBUG_RETURN(HA_ERR_INTERNAL_ERROR);
 
   delete scan_result; scan_result= nullptr; scan_row= 0;
+  scan_field_map.clear();
 
   try
   {
-    auto r= connection->Query("SELECT * FROM " + duckdb_table_name);
+    // Build column list from read_set — only fetch columns MariaDB needs.
+    std::string select_cols;
+    for (uint i= 0; i < table->s->fields; i++)
+    {
+      if (bitmap_is_set(table->read_set, i))
+      {
+        if (!select_cols.empty()) select_cols += ", ";
+        select_cols += '"';
+        select_cols += table->s->field[i]->field_name.str;
+        select_cols += '"';
+        scan_field_map.push_back(i);
+      }
+    }
+    if (select_cols.empty()) select_cols= "1";  // e.g. COUNT(*) needs no cols
+
+    std::string sql= "SELECT " + select_cols + " FROM " + duckdb_table_name;
+    if (!pushed_where.empty())
+      sql += " WHERE " + pushed_where;
+
+    auto r= connection->Query(sql);
     if (r->HasError())
     {
       sql_print_error("DuckDB: rnd_init failed: %s", r->GetError().c_str());
@@ -715,10 +801,16 @@ int ha_duckdb::convert_row_from_duckdb(uchar *buf, size_t row_idx,
 {
   memset(buf, 0, table->s->null_bytes);
 
-  for (uint i= 0; i < table->s->fields; i++)
+  // If scan_field_map is populated, only a column subset was fetched.
+  // DuckDB result column j maps to MariaDB field scan_field_map[j].
+  // Otherwise fall back to sequential 1:1 mapping.
+  uint ncols= scan_field_map.empty() ? table->s->fields
+                                     : (uint)scan_field_map.size();
+  for (uint j= 0; j < ncols; j++)
   {
-    Field *field= table->field[i];
-    duckdb::Value val= result->GetValue(i, row_idx);
+    uint fi= scan_field_map.empty() ? j : scan_field_map[j];
+    Field *field= table->field[fi];
+    duckdb::Value val= result->GetValue(j, row_idx);
 
     if (val.IsNull()) { field->set_null(); continue; }
     field->set_notnull();
