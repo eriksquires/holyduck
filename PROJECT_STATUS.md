@@ -103,7 +103,6 @@ The safe pattern is: add new column → populate it → drop old column → rena
 |---|---|
 | Column type changes | Not supported — use add/populate/rename/drop pattern |
 | `INSERT ... ON DUPLICATE KEY UPDATE` | Not supported |
-| `ALTER TABLE ADD/DROP COLUMN` across databases | Not tested |
 | Aggregation pushdown | Aggregations still run in MariaDB; only row/column filtering is pushed for cross-engine queries |
 | Bulk INSERT constraint errors | Returns error 1030 instead of 1022 (ugly but correct — batch rejected) |
 
