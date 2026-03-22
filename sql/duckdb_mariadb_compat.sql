@@ -79,6 +79,16 @@ CREATE OR REPLACE MACRO find_in_set(needle, lst) AS
 -- Handled by the rewrite pass in ha_duckdb.cc instead.
 
 -- ---------------------------------------------------------------------------
+-- Time bucketing
+-- ---------------------------------------------------------------------------
+
+-- MariaDB UDF: RoundDateTime(datetime, bucket_size_in_seconds)
+-- Truncates a timestamp to the nearest multiple of bucket_size seconds.
+-- Wraps DuckDB's native time_bucket() function.
+CREATE OR REPLACE MACRO rounddatetime(dt, bucket_secs) AS
+    time_bucket(to_seconds(CAST(bucket_secs AS BIGINT)), dt::TIMESTAMP);
+
+-- ---------------------------------------------------------------------------
 -- Control flow
 -- ---------------------------------------------------------------------------
 

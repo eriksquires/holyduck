@@ -1,18 +1,19 @@
 #!/bin/bash
-# deploy.sh — Build ha_duckdb plugin and deploy it into the test container.
+# deploy.sh — Build ha_duckdb plugin and deploy it into a target container.
 #
 # Usage:
 #   ./scripts/deploy.sh [container-name]
 #
-# Defaults to container "duckdb-plugin-test".
+# Defaults to container "duckdb-plugin-dev-ubuntu".
+# Detects plugin directory and restart method from the target container.
 # Handles the full lifecycle: build → copy → restart → wait → install → verify.
+#
+# Prerequisite: run cmake-setup.sh once per container before first deploy.
 
 set -euo pipefail
 
 PLUGIN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-BUILD_DIR="${PLUGIN_DIR}/build"
-CONTAINER="${1:-duckdb-plugin-test}"
-PLUGIN_DEST="/usr/lib/mysql/plugin"
+CONTAINER="${1:-duckdb-plugin-dev-ubuntu}"
 MARIADB_OPTS="-uroot -ptestpass --ssl=0"
 
 # ── Colours ──────────────────────────────────────────────────────────────────
@@ -27,23 +28,50 @@ docker inspect --format '{{.State.Running}}' "${CONTAINER}" 2>/dev/null \
     | grep -q true || die "Container '${CONTAINER}' is not running. Start it first."
 ok "Container is running."
 
-# ── 2. Build ──────────────────────────────────────────────────────────────────
+# ── 2. Detect distro-specific settings from the container ─────────────────────
+info "Detecting container environment..."
+
+# Plugin directory — query MariaDB directly so it works on any distro
+PLUGIN_DEST=$(docker exec "${CONTAINER}" mariadb ${MARIADB_OPTS} \
+    --skip-column-names -e "SELECT @@plugin_dir;" 2>/dev/null | tr -d '[:space:]')
+[[ -n "${PLUGIN_DEST}" ]] || die "Could not determine plugin_dir from container."
+ok "Plugin directory: ${PLUGIN_DEST}"
+
+# Build directory — detect from distro version
+OS_RELEASE=$(docker exec "${CONTAINER}" cat /etc/os-release 2>/dev/null)
+if echo "${OS_RELEASE}" | grep -qi "oracle linux 9\|rhel.*9\|centos.*9"; then
+    BUILD_DIR="${PLUGIN_DIR}/build-oracle9"
+    RESTART_CMD="mysqladmin -uroot -ptestpass shutdown; sleep 2; mysqld_safe --user=mysql &"
+elif echo "${OS_RELEASE}" | grep -qi "oracle\|rhel\|centos"; then
+    BUILD_DIR="${PLUGIN_DIR}/build-oracle8"
+    RESTART_CMD="mysqladmin -uroot -ptestpass shutdown; sleep 2; mysqld_safe --user=mysql &"
+else
+    BUILD_DIR="${PLUGIN_DIR}/build"
+    RESTART_CMD="service mariadb restart"
+fi
+ok "Build directory: ${BUILD_DIR}"
+
+# ── 3. Build ──────────────────────────────────────────────────────────────────
 info "Building ha_duckdb..."
-make -j"$(nproc)" -C "${BUILD_DIR}" 2>&1 | grep -E "error:|warning:|Built target|Error" || true
+# All distros build inside the container — cmake was configured with container-internal paths
+BUILD_SUBDIR="$(basename "${BUILD_DIR}")"
+docker exec "${CONTAINER}" bash -c \
+    "make -j\$(nproc) -C /plugin-src/${BUILD_SUBDIR} 2>&1" \
+    | grep -E "error:|warning:|Built target|Error" || true
 [[ -f "${BUILD_DIR}/libha_duckdb.so" ]] || die "Build failed — libha_duckdb.so not found."
 ok "Build complete: $(ls -sh "${BUILD_DIR}/libha_duckdb.so" | awk '{print $1}')"
 
-# ── 3. Copy plugin and companion SQL file ─────────────────────────────────────
+# ── 4. Copy plugin and companion SQL file ─────────────────────────────────────
 info "Copying plugin into container..."
 docker cp "${BUILD_DIR}/libha_duckdb.so"            "${CONTAINER}:${PLUGIN_DEST}/ha_duckdb.so"
 docker cp "${BUILD_DIR}/duckdb_mariadb_compat.sql"  "${CONTAINER}:${PLUGIN_DEST}/duckdb_mariadb_compat.sql"
 ok "Files copied."
 
-# ── 4. Restart MariaDB ────────────────────────────────────────────────────────
+# ── 5. Restart MariaDB ────────────────────────────────────────────────────────
 info "Restarting MariaDB..."
-docker exec "${CONTAINER}" service mariadb restart 2>&1 | grep -v "^$" || true
+docker exec "${CONTAINER}" bash -c "${RESTART_CMD}" 2>&1 | grep -v "^$" || true
 
-# ── 5. Wait for MariaDB to be ready ──────────────────────────────────────────
+# ── 6. Wait for MariaDB to be ready ──────────────────────────────────────────
 info "Waiting for MariaDB to be ready..."
 for i in $(seq 1 30); do
     if docker exec "${CONTAINER}" mysqladmin ${MARIADB_OPTS} ping --silent 2>/dev/null; then
@@ -54,7 +82,7 @@ for i in $(seq 1 30); do
     if [[ $i -eq 30 ]]; then die "MariaDB did not start within 30 seconds."; fi
 done
 
-# ── 6. Ensure plugin is installed ────────────────────────────────────────────
+# ── 7. Ensure plugin is installed ────────────────────────────────────────────
 info "Checking plugin registration..."
 LOADED=$(docker exec "${CONTAINER}" mariadb ${MARIADB_OPTS} \
     -e "SELECT COUNT(*) FROM information_schema.ENGINES WHERE ENGINE='DUCKDB' AND SUPPORT IN ('YES','DEFAULT');" \
@@ -67,7 +95,7 @@ if [[ "${LOADED}" == "0" ]]; then
         || info "Install returned an error (may already be registered)."
 fi
 
-# ── 7. Verify ─────────────────────────────────────────────────────────────────
+# ── 8. Verify ─────────────────────────────────────────────────────────────────
 RESULT=$(docker exec "${CONTAINER}" mariadb ${MARIADB_OPTS} \
     -e "SELECT ENGINE, SUPPORT, COMMENT FROM information_schema.ENGINES WHERE ENGINE='DUCKDB';" \
     2>/dev/null)

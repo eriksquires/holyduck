@@ -1,59 +1,62 @@
 # syntax=docker/dockerfile:1.7
-# Ubuntu 22.04 base image — MariaDB 11.8.3 + build environment for ha_duckdb.so
-FROM ubuntu:22.04
+# Oracle Linux 9 base image — MariaDB 11.8.3 + build environment for ha_duckdb.so
+# Mirrors base-oracle8.dockerfile for the Oracle/RHEL 9 ecosystem.
+FROM oraclelinux:9
 
-ENV DEBIAN_FRONTEND=noninteractive
+# Set environment variables
 ENV MYSQL_ROOT_PASSWORD=testpass
 ENV MARIADB_VERSION=11.8.3
 
+# Enable EPEL and CodeReady Builder (CRB) for build dependencies
+RUN dnf install -y oracle-epel-release-el9 && \
+    dnf config-manager --enable ol9_codeready_builder && \
+    dnf update -y
+
 # Install build tools and development dependencies
-RUN --mount=type=cache,target=/var/cache/apt \
-    --mount=type=cache,target=/var/lib/apt \
-    apt-get update && apt-get install -y \
+RUN --mount=type=cache,target=/var/cache/dnf \
+    dnf install -y \
     wget \
     curl \
     vim \
     git \
     cmake \
-    build-essential \
+    gcc \
+    gcc-c++ \
+    make \
     bison \
-    libncurses-dev \
-    libreadline-dev \
-    libssl-dev \
-    libxml2-dev \
-    libaio-dev \
-    libevent-dev \
-    python3-dev \
-    libboost-dev \
-    liblz4-dev \
-    zlib1g-dev \
-    pkg-config
+    ncurses-devel \
+    readline-devel \
+    openssl-devel \
+    libxml2-devel \
+    libaio-devel \
+    libevent-devel \
+    python3-devel \
+    boost-devel \
+    lz4-devel \
+    zlib-devel \
+    pkgconf
 
 # Add MariaDB 11.8.3 repository
 RUN curl -LsS https://r.mariadb.com/downloads/mariadb_repo_setup | bash -s -- --mariadb-server-version="mariadb-${MARIADB_VERSION}" --skip-maxscale
-RUN rm -f /etc/apt/sources.list.d/mariadb-maxscale.list
 
 # Install MariaDB
-RUN --mount=type=cache,target=/var/cache/apt \
-    --mount=type=cache,target=/var/lib/apt \
-    apt-get update && apt-get install -y \
-    mariadb-server \
-    mariadb-client \
-    libmariadb-dev \
-    libmariadbd-dev
-
-# Initialize MariaDB system tables
-RUN mysql_install_db --user=mysql --datadir=/var/lib/mysql
+RUN --mount=type=cache,target=/var/cache/dnf \
+    dnf install -y \
+    MariaDB-server \
+    MariaDB-client \
+    MariaDB-devel \
+    MariaDB-shared
 
 # Create run directory for mysqld
 RUN mkdir -p /run/mysqld && chown mysql:mysql /run/mysqld
 
 # Configure MariaDB
-RUN echo "[mysqld]" > /etc/mysql/mariadb.conf.d/50-server.cnf \
-&& echo "bind-address = 0.0.0.0" >> /etc/mysql/mariadb.conf.d/50-server.cnf \
-&& echo "port = 3306" >> /etc/mysql/mariadb.conf.d/50-server.cnf \
-&& echo "innodb_buffer_pool_size = 512M" >> /etc/mysql/mariadb.conf.d/50-server.cnf \
-&& echo "max_connections = 100" >> /etc/mysql/mariadb.conf.d/50-server.cnf
+RUN mkdir -p /etc/my.cnf.d && \
+    echo "[mysqld]" > /etc/my.cnf.d/50-server.cnf && \
+    echo "bind-address = 0.0.0.0" >> /etc/my.cnf.d/50-server.cnf && \
+    echo "port = 3306" >> /etc/my.cnf.d/50-server.cnf && \
+    echo "innodb_buffer_pool_size = 512M" >> /etc/my.cnf.d/50-server.cnf && \
+    echo "max_connections = 100" >> /etc/my.cnf.d/50-server.cnf
 
 # Install DuckDB CLI
 RUN curl https://install.duckdb.org | sh \
@@ -63,7 +66,8 @@ RUN curl https://install.duckdb.org | sh \
 WORKDIR /workspace
 RUN mkdir -p /plugin-src /mariadb-src /build
 
-# Create startup script for MariaDB
+# Create startup script — initializes data dir on first run, uses mysqld_safe
+# (systemd not available in containers)
 RUN echo '#!/bin/bash' > /usr/local/bin/start-mariadb.sh \
 && echo 'set -e' >> /usr/local/bin/start-mariadb.sh \
 && echo 'chown -R mysql:mysql /var/lib/mysql' >> /usr/local/bin/start-mariadb.sh \
@@ -72,11 +76,11 @@ RUN echo '#!/bin/bash' > /usr/local/bin/start-mariadb.sh \
 && echo '  mysql_install_db --user=mysql --datadir=/var/lib/mysql' >> /usr/local/bin/start-mariadb.sh \
 && echo 'fi' >> /usr/local/bin/start-mariadb.sh \
 && echo 'echo "Starting MariaDB..."' >> /usr/local/bin/start-mariadb.sh \
-&& echo 'service mariadb start' >> /usr/local/bin/start-mariadb.sh \
+&& echo 'mysqld_safe --user=mysql &' >> /usr/local/bin/start-mariadb.sh \
 && echo 'echo "Waiting for MariaDB to be ready..."' >> /usr/local/bin/start-mariadb.sh \
-&& echo 'while ! mysqladmin ping --silent; do sleep 1; done' >> /usr/local/bin/start-mariadb.sh \
+&& echo 'while ! mysqladmin -h 127.0.0.1 ping --silent 2>/dev/null; do sleep 1; done' >> /usr/local/bin/start-mariadb.sh \
 && echo 'echo "Setting root password..."' >> /usr/local/bin/start-mariadb.sh \
-&& echo 'mysqladmin -u root password "${MYSQL_ROOT_PASSWORD}" 2>/dev/null || true' >> /usr/local/bin/start-mariadb.sh \
+&& echo 'mariadb -u root -e "ALTER USER '"'"'root'"'"'@'"'"'localhost'"'"' IDENTIFIED BY '"'"'${MYSQL_ROOT_PASSWORD}'"'"'; FLUSH PRIVILEGES;" 2>/dev/null || true' >> /usr/local/bin/start-mariadb.sh \
 && echo 'echo "MariaDB is ready!"' >> /usr/local/bin/start-mariadb.sh \
 && chmod +x /usr/local/bin/start-mariadb.sh
 

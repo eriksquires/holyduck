@@ -18,6 +18,7 @@
 #include "handler.h"
 #include "my_base.h"
 #include "select_handler.h"
+#include "derived_handler.h"
 #include <string>
 #include <vector>
 
@@ -203,11 +204,34 @@ class ha_duckdb_select_handler : public select_handler
 public:
   ha_duckdb_select_handler(THD *thd, SELECT_LEX *sel,
                            duckdb::Connection *conn);
+  ha_duckdb_select_handler(THD *thd, SELECT_LEX_UNIT *unit,
+                           duckdb::Connection *conn);
   ~ha_duckdb_select_handler();
 
   int init_scan()  override;
   int next_row()   override;
   int end_scan()   override;
+};
+
+/**
+  @brief
+  Pushdown handler — intercepts a derived table (subquery in FROM clause, or CTE)
+  whose leaf tables are all DUCKDB engine, and runs it entirely inside DuckDB.
+  MariaDB sees a small result set instead of scanning every raw row.
+*/
+class ha_duckdb_derived_handler : public derived_handler
+{
+  duckdb::Connection *connection;
+  duckdb::MaterializedQueryResult *result;
+  size_t current_row;
+
+public:
+  ha_duckdb_derived_handler(THD *thd, TABLE_LIST *tbl, duckdb::Connection *conn);
+  ~ha_duckdb_derived_handler();
+
+  int init_scan() override;
+  int next_row()  override;
+  int end_scan()  override;
 };
 
 #endif /* HA_DUCKDB_INCLUDED */

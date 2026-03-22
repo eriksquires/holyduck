@@ -1,6 +1,6 @@
 # MariaDB DuckDB Storage Engine — Project Status
 
-## What Works (as of 2026-03-22)
+## What Works (as of 2026-03-22, updated same day)
 
 ### DDL
 - `CREATE TABLE ... ENGINE=DUCKDB` — creates a shared `#duckdb/global.duckdb` file per database
@@ -23,6 +23,19 @@
 - **Full SELECT pushdown** via `ha_duckdb_select_handler`: GROUP BY, SUM, COUNT, AVG,
   ORDER BY executed entirely inside DuckDB when all tables in the query are DUCKDB engine.
   EXPLAIN shows `PUSHED SELECT` with all-NULL access details.
+- **UNION / INTERSECT / EXCEPT pushdown** via `create_unit`: When all SELECT arms reference
+  only DUCKDB tables, the entire set operation runs inside DuckDB.
+  EXPLAIN shows `PUSHED UNION`. Includes `UNION ALL` and deduplicating `UNION`.
+- **Derived table / CTE pushdown** via `create_derived`: When a subquery in the FROM clause
+  (or a CTE) references only DUCKDB tables, it runs entirely inside DuckDB before the result
+  is returned to MariaDB. EXPLAIN shows `PUSHED DERIVED`.
+  Key pattern: pre-aggregate DuckDB data in a CTE, then join the small result with InnoDB.
+  ```sql
+  WITH agg AS (
+      SELECT sensor_id, AVG(val) AS avg_val FROM duckdb_metrics GROUP BY sensor_id
+  )
+  SELECT s.name, a.avg_val FROM innodb_sensors s JOIN agg a ON s.id = a.sensor_id;
+  ```
 - **Condition pushdown** via `cond_push()`: For cross-engine joins, WHERE conditions are pushed
   into the DuckDB scan query.  EXPLAIN shows `Using where with pushed condition`.
   Verified: 1-month date filter returns 12,488 rows instead of 300,000.
@@ -40,6 +53,7 @@ Macros installed into DuckDB at startup translate MariaDB function names:
 - `DATE_FORMAT`, `UNIX_TIMESTAMP`, `FROM_UNIXTIME`, `LAST_DAY`
 - `LOCATE`, `MID`, `SPACE`, `STRCMP`, `REGEXP_SUBSTR`, `FIND_IN_SET`
 - `IF`
+- `RoundDateTime(dt, bucket_secs)` — wraps DuckDB's native `time_bucket()` for time bucketing
 - `CHAR(n)` rewritten to `chr(n)` in the SQL rewrite pass
 - `<cache>(expr)` wrappers from MariaDB's AST printer stripped automatically
 
@@ -71,11 +85,13 @@ Condition pushdown reduces the rows DuckDB returns before the join.
        ▼
 [MariaDB 11.8.3]  ← standard SQL interface
        │
-       ├─ Pure-DUCKDB query ──► ha_duckdb_select_handler  (full pushdown, ~0.005s)
+       ├─ Pure-DUCKDB SELECT ──► ha_duckdb_select_handler   (PUSHED SELECT)
+       ├─ Pure-DUCKDB UNION  ──► ha_duckdb_select_handler   (PUSHED UNION)
+       ├─ DuckDB CTE/subquery ─► ha_duckdb_derived_handler  (PUSHED DERIVED)
        │
-       └─ Cross-engine join ──► ha_duckdb::rnd_init()      (batched scan)
-                                  cond_push() → WHERE in DuckDB query
-                                  read_set   → SELECT only needed columns
+       └─ Cross-engine join  ──► ha_duckdb::rnd_init()      (batched scan)
+                                   cond_push() → WHERE in DuckDB query
+                                   read_set   → SELECT only needed columns
        │
        ▼
 [DuckDB embedded engine]  ← libduckdb.so v1.5.0
@@ -103,7 +119,7 @@ The safe pattern is: add new column → populate it → drop old column → rena
 |---|---|
 | Column type changes | Not supported — use add/populate/rename/drop pattern |
 | `INSERT ... ON DUPLICATE KEY UPDATE` | Not supported |
-| Aggregation pushdown | For cross-engine queries, aggregations still run in MariaDB; only row/column filtering is pushed |
+| Aggregation pushdown (cross-engine) | Direct cross-engine joins: aggregations run in MariaDB. Workaround: wrap DuckDB aggregation in a CTE — `PUSHED DERIVED` fires and runs it in DuckDB |
 | Bulk INSERT constraint errors | Returns error 1030 instead of 1022 (ugly but correct — batch rejected) |
 
 ## File Layout

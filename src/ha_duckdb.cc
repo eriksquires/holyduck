@@ -286,9 +286,13 @@ static void init_duckdb_psi_keys()
 static handler *create_duckdb_handler(handlerton *hton, TABLE_SHARE *table,
                                       MEM_ROOT *mem_root);
 
-static select_handler *create_duckdb_select_handler(THD *thd,
-                                                     SELECT_LEX *sel,
-                                                     SELECT_LEX_UNIT *unit);
+static select_handler  *create_duckdb_select_handler(THD *thd,
+                                                      SELECT_LEX *sel,
+                                                      SELECT_LEX_UNIT *unit);
+static select_handler  *create_duckdb_unit_handler(THD *thd,
+                                                    SELECT_LEX_UNIT *unit);
+static derived_handler *create_duckdb_derived_handler(THD *thd,
+                                                      TABLE_LIST *derived);
 
 static int duckdb_init_func(void *p)
 {
@@ -303,7 +307,9 @@ static int duckdb_init_func(void *p)
 
   duckdb_hton= (handlerton *)p;
   duckdb_hton->create=        create_duckdb_handler;
-  duckdb_hton->create_select= create_duckdb_select_handler;
+  duckdb_hton->create_select=  create_duckdb_select_handler;
+  duckdb_hton->create_unit=    create_duckdb_unit_handler;
+  duckdb_hton->create_derived= create_duckdb_derived_handler;
   duckdb_hton->flags=         0;
   duckdb_hton->tablefile_extensions= ha_duckdb_exts;
 
@@ -1787,6 +1793,13 @@ ha_duckdb_select_handler::ha_duckdb_select_handler(THD *thd, SELECT_LEX *sel,
     connection(conn), result(nullptr), current_row(0)
 {}
 
+ha_duckdb_select_handler::ha_duckdb_select_handler(THD *thd,
+                                                   SELECT_LEX_UNIT *unit,
+                                                   duckdb::Connection *conn)
+  : select_handler(thd, duckdb_hton, unit),
+    connection(conn), result(nullptr), current_row(0)
+{}
+
 ha_duckdb_select_handler::~ha_duckdb_select_handler()
 {
   delete result;
@@ -1797,8 +1810,13 @@ int ha_duckdb_select_handler::init_scan()
 {
   // Reconstruct the SQL from the parse tree — table names are schema-qualified
   // (e.g. test.sales) which matches our DuckDB schema layout exactly.
+  // lex_unit is set for UNION/INTERSECT/EXCEPT (create_unit path);
+  // select_lex is set for plain SELECT (create_select path).
   String query_str;
-  select_lex->print(thd, &query_str, QT_ORDINARY);
+  if (lex_unit)
+    lex_unit->print(&query_str, QT_ORDINARY);
+  else
+    select_lex->print(thd, &query_str, QT_ORDINARY);
   std::string sql(query_str.ptr(), query_str.length());
 
   // MariaDB print() uses backtick quoting; DuckDB expects double quotes.
@@ -1854,6 +1872,156 @@ int ha_duckdb_select_handler::next_row()
 }
 
 int ha_duckdb_select_handler::end_scan()
+{
+  delete result;
+  result= nullptr;
+  return 0;
+}
+
+// ---------------------------------------------------------------------------
+// UNION / INTERSECT / EXCEPT pushdown handler
+// ---------------------------------------------------------------------------
+
+static select_handler *
+create_duckdb_unit_handler(THD *thd, SELECT_LEX_UNIT *unit)
+{
+  if (!unit) return nullptr;
+
+  // Walk every SELECT arm — all leaf tables must be DUCKDB engine
+  TABLE_LIST *first_table= nullptr;
+  for (SELECT_LEX *sl= unit->first_select(); sl; sl= sl->next_select())
+  {
+    List_iterator<TABLE_LIST> it(sl->leaf_tables);
+    TABLE_LIST *tl;
+    while ((tl= it++))
+    {
+      if (!tl->table || tl->table->file->ht != duckdb_hton)
+        return nullptr;
+      if (!first_table) first_table= tl;
+    }
+  }
+
+  if (!first_table) return nullptr;
+
+  ha_duckdb *h= static_cast<ha_duckdb*>(first_table->table->file);
+  if (h->db_file_path.empty()) return nullptr;
+
+  duckdb::DuckDB *db= registry_get(h->db_file_path);
+  if (!db) return nullptr;
+
+  duckdb::Connection *conn= nullptr;
+  try { conn= new duckdb::Connection(*db); }
+  catch (...) { registry_release(h->db_file_path); return nullptr; }
+
+  return new ha_duckdb_select_handler(thd, unit, conn);
+}
+
+// ---------------------------------------------------------------------------
+// Derived table pushdown handler
+// ---------------------------------------------------------------------------
+
+static derived_handler *
+create_duckdb_derived_handler(THD *thd, TABLE_LIST *derived)
+{
+  if (!derived || !derived->derived) return nullptr;
+
+  SELECT_LEX *sel= derived->derived->first_select();
+  if (!sel) return nullptr;
+
+  // Only push down if every leaf table uses the DUCKDB engine
+  List_iterator<TABLE_LIST> it(sel->leaf_tables);
+  TABLE_LIST *tl;
+  while ((tl= it++))
+  {
+    if (!tl->table || tl->table->file->ht != duckdb_hton)
+      return nullptr;
+  }
+
+  // Get connection from first table — same pattern as create_duckdb_select_handler
+  List_iterator<TABLE_LIST> it2(sel->leaf_tables);
+  TABLE_LIST *first= it2++;
+  if (!first || !first->table) return nullptr;
+
+  ha_duckdb *h= static_cast<ha_duckdb*>(first->table->file);
+  if (h->db_file_path.empty()) return nullptr;
+
+  duckdb::DuckDB *db= registry_get(h->db_file_path);
+  if (!db) return nullptr;
+
+  duckdb::Connection *conn= nullptr;
+  try { conn= new duckdb::Connection(*db); }
+  catch (...) { registry_release(h->db_file_path); return nullptr; }
+
+  return new ha_duckdb_derived_handler(thd, derived, conn);
+}
+
+ha_duckdb_derived_handler::ha_duckdb_derived_handler(THD *thd, TABLE_LIST *tbl,
+                                                     duckdb::Connection *conn)
+  : derived_handler(thd, duckdb_hton),
+    connection(conn), result(nullptr), current_row(0)
+{
+  derived= tbl;
+}
+
+ha_duckdb_derived_handler::~ha_duckdb_derived_handler()
+{
+  delete result;
+  delete connection;
+}
+
+int ha_duckdb_derived_handler::init_scan()
+{
+  // unit is inherited from derived_handler base; print() reconstructs the full
+  // subquery SQL including GROUP BY, HAVING, ORDER BY.
+  String query_str;
+  unit->print(&query_str, QT_ORDINARY);
+  std::string sql(query_str.ptr(), query_str.length());
+
+  for (char &c : sql)
+    if (c == '`') c = '"';
+  sql= rewrite_mariadb_sql(sql);
+
+  try
+  {
+    auto r= connection->Query(sql);
+    if (r->HasError())
+    {
+      sql_print_error("DuckDB derived pushdown failed: %s\nSQL: %s",
+                      r->GetErrorObject().Message().c_str(), sql.c_str());
+      return 1;
+    }
+    result= r.release();
+    current_row= 0;
+  }
+  catch (const std::exception &e)
+  {
+    sql_print_error("DuckDB derived pushdown exception: %s", e.what());
+    return 1;
+  }
+  return 0;
+}
+
+int ha_duckdb_derived_handler::next_row()
+{
+  if (!result || current_row >= result->RowCount())
+    return HA_ERR_END_OF_FILE;
+
+  memset(table->record[0], 0, table->s->null_bytes);
+
+  for (uint i= 0; i < table->s->fields && i < result->ColumnCount(); i++)
+  {
+    Field *field= table->field[i];
+    duckdb::Value val= result->GetValue(i, current_row);
+    if (val.IsNull()) { field->set_null(); continue; }
+    field->set_notnull();
+    std::string s= val.ToString();
+    field->store(s.c_str(), s.length(), system_charset_info);
+  }
+  current_row++;
+  return 0;
+}
+
+int ha_duckdb_derived_handler::end_scan()
 {
   delete result;
   result= nullptr;

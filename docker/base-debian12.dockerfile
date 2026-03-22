@@ -1,6 +1,7 @@
 # syntax=docker/dockerfile:1.7
-# Ubuntu 22.04 base image — MariaDB 11.8.3 + build environment for ha_duckdb.so
-FROM ubuntu:22.04
+# Debian 12 (Bookworm) base image — MariaDB 11.8.3 + build environment for ha_duckdb.so
+# Mirrors base-ubuntu.dockerfile — same apt/package structure, newer glibc 2.36.
+FROM debian:12
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV MYSQL_ROOT_PASSWORD=testpass
@@ -27,6 +28,7 @@ RUN --mount=type=cache,target=/var/cache/apt \
     libboost-dev \
     liblz4-dev \
     zlib1g-dev \
+    systemd \
     pkg-config
 
 # Add MariaDB 11.8.3 repository
