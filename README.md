@@ -36,7 +36,7 @@ JOIN agg a ON s.id = a.sensor_id;
 
 EXPLAIN confirms the CTE runs entirely inside DuckDB (`PUSHED DERIVED`), returning a small result for MariaDB to join.
 
-## Requirements
+## Build Requirements
 
 - Linux x86-64
 - Docker
@@ -102,6 +102,8 @@ SELECT AVG(val) FROM t;
 
 ## Pre-built Binaries
 
+We're a little behind but should be up soon. 
+
 Pre-built `.so` files for each distro are available on the [Releases](https://github.com/eriksquires/HolyDuck/releases) page. Download the appropriate file, place it in your MariaDB plugin directory, and:
 
 ```sql
@@ -121,6 +123,14 @@ vim src/ha_duckdb.cc
 docker exec -it duckdb-plugin-dev-ubuntu mariadb -uroot -ptestpass
 ```
 
+## Usage Limitations
+
+There are some known limitations in DuckDB and how MariaDB handles multi-table joins we should address.  Running DuckDB under the hood does not magically get you simultaneous multiple writer/multiple reader access.  The entire DuckDB workspace is still limited to a single writer at a time.  However, using MariaDB you can have multiple users querying MariaDB tables at the same time.  Multiple users can write to DuckDB tables, but any writer will block all others until they finish. 
+
+If your process is like mine with big overnight ETL jobs followed by Exploratory Data Analysis during the day this is perfect, especially if you are going from million/billion row tables to very small one's.  You can use DuckDB to do your mega aggregations and scans, drop the results in InnoDB and pretend nothing is wrong. 
+
+A lot of work has been done to enable pushdown of SQL queries and WHERE clauses.  For queries which are against DuckDB tables only 100% happens in the Duck.  For queries which require joins across DB engines that gets a little harder.  With no optimization DuckDB is still fast enough that MariaDB does much less work.  With a little SQL rewriting you can overcome most performance hurdles.  
+
 ## Query Pushdown
 
 The engine implements three pushdown paths:
@@ -131,7 +141,7 @@ The engine implements three pushdown paths:
 | `PUSHED UNION` | All arms of UNION/INTERSECT/EXCEPT are DUCKDB | Entire set operation |
 | `PUSHED DERIVED` | CTE or subquery references only DUCKDB tables | Entire CTE/subquery |
 
-For mixed-engine queries, condition pushdown (`cond_push()`) and column subset scanning reduce the data DuckDB returns to MariaDB.
+For mixed-engine queries, condition pushdown (`cond_push()`) and column subset scanning reduce the data DuckDB returns to MariaDB.  We'll cover the pushdown status in detail in TECHNICAL.md
 
 ## MariaDB Compatibility Macros
 

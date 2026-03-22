@@ -28,16 +28,22 @@
   EXPLAIN shows `PUSHED UNION`. Includes `UNION ALL` and deduplicating `UNION`.
 - **Derived table / CTE pushdown** via `create_derived`: When a subquery in the FROM clause
   (or a CTE) references only DUCKDB tables, it runs entirely inside DuckDB before the result
-  is returned to MariaDB. EXPLAIN shows `PUSHED DERIVED`.
-  Key pattern: pre-aggregate DuckDB data in a CTE, then join the small result with InnoDB.
+  is returned to MariaDB.  This gives us an opportunity for performance tuning multi-engine joins:
+
+**Solution:**  pre-aggregate DuckDB data in a CTE or subquery, then join the small result with InnoDB.
+
   ```sql
   WITH agg AS (
       SELECT sensor_id, AVG(val) AS avg_val FROM duckdb_metrics GROUP BY sensor_id
   )
   SELECT s.name, a.avg_val FROM innodb_sensors s JOIN agg a ON s.id = a.sensor_id;
   ```
+
+Alternatively, put both tables in DuckDB. 
+
 - **Condition pushdown** via `cond_push()`: For cross-engine joins, WHERE conditions are pushed
-  into the DuckDB scan query. EXPLAIN shows `Using where with pushed condition`.
+  into the DuckDB scan query.
+
 - **Column subset scan**: For cross-engine joins, `rnd_init()` reads `table->read_set` and emits
   `SELECT col1, col2` instead of `SELECT *`, reducing data transfer.
 
@@ -45,14 +51,14 @@
 - Write locks upgraded to `TL_WRITE` in `store_lock()` — MariaDB serializes concurrent writers
   at the table level (DuckDB only supports one writer at a time).
 - Concurrent readers work via DuckDB's MVCC — readers never blocked by other readers.
-- Readers briefly blocked during active writes (acceptable; writes are infrequent).
+- Readers briefly blocked during active writes.
 
 ### MariaDB Function Compatibility
 Macros installed into DuckDB at startup translate MariaDB function names:
 - `DATE_FORMAT`, `UNIX_TIMESTAMP`, `FROM_UNIXTIME`, `LAST_DAY`
 - `LOCATE`, `MID`, `SPACE`, `STRCMP`, `REGEXP_SUBSTR`, `FIND_IN_SET`
 - `IF`
-- `RoundDateTime(dt, bucket_secs)` — wraps DuckDB's native `time_bucket()` for time bucketing
+- `RoundDateTime(dt, bucket_secs)` — wraps DuckDB's native `time_bucket()` for time bucketing. This feature is one the author alone uses but we leave it for you too. 
 - `CHAR(n)` rewritten to `chr(n)` in the SQL rewrite pass
 - `<cache>(expr)` wrappers from MariaDB's AST printer stripped automatically
 
@@ -74,7 +80,7 @@ Macros live in `sql/duckdb_mariadb_compat.sql` — edit and redeploy without rec
 ### Cross-Engine Joins
 MariaDB can join DUCKDB tables with InnoDB tables. The optimizer uses `type=ALL` for the
 DuckDB table (intentional — see Architecture below) and `eq_ref` for InnoDB lookups.
-Condition pushdown reduces the rows DuckDB returns before the join.
+Condition pushdown reduces the rows DuckDB returns before the join, but it cannot filter based on joins with outside tables.  
 
 ## Architecture
 
@@ -118,7 +124,7 @@ The safe pattern is: add new column → populate it → drop old column → rena
 |---|---|
 | Column type changes | Not supported — use add/populate/rename/drop pattern |
 | `INSERT ... ON DUPLICATE KEY UPDATE` | Not supported |
-| Aggregation pushdown (cross-engine) | Aggregations run in MariaDB; workaround: wrap DuckDB aggregation in a CTE — `PUSHED DERIVED` fires and runs it in DuckDB |
+| Aggregation pushdown (cross-engine) | Aggregations run in MariaDB; workaround: wrap DuckDB aggregation in a CTE or subquery |
 | Bulk INSERT constraint errors | Returns error 1030 instead of 1022 (batch rejected, correct behavior) |
 
 ## Repository Layout
