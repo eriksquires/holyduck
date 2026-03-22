@@ -1,30 +1,35 @@
-# MariaDB DuckDB Storage Engine - Project Status
+# MariaDB DuckDB Storage Engine — Project Status
 
-## What Works (as of 2026-03-21)
+## What Works (as of 2026-03-22)
 
-### ✅ Plugin Compiles and Loads
-- Standalone build against MariaDB 11.8.3 source tree (`mariadb-11.8.3-git/build/`)
-- Configurable via `-DMARIADB_SOURCE_DIR` and `-DMARIADB_BUILD_DIR` cmake vars
-- Loads cleanly into MariaDB 11.8.3 — `SHOW ENGINES` lists DUCKDB
+### Core SQL Operations
+- `CREATE TABLE ... ENGINE=DUCKDB` — creates a shared `#duckdb/global.duckdb` file per database
+- `INSERT INTO` — rows written via DuckDB Appender API (bulk-insert path)
+- `SELECT` — full table scan via DuckDB MaterializedQueryResult
+- `DROP TABLE` — removes table from DuckDB
+- `RENAME TABLE` — renames table in DuckDB
 
-### ✅ Core SQL Operations
-- `CREATE TABLE ... ENGINE=DUCKDB` — creates a per-table `.duckdb` file on disk
-- `INSERT INTO` — rows written via DuckDB Appender API
-- `SELECT *` — full table scan via DuckDB result set
-- `DROP TABLE` — removes `.duckdb` and `.duckdb.wal` files
-- `RENAME TABLE` — renames the `.duckdb` file
+### Query Pushdown
+- **Full SELECT pushdown** via `ha_duckdb_select_handler`: GROUP BY, SUM, COUNT, AVG,
+  ORDER BY executed entirely inside DuckDB when all tables in the query are DUCKDB engine.
+  EXPLAIN shows `PUSHED SELECT` with all-NULL access details.
+- **Condition pushdown** via `cond_push()`: WHERE conditions on cross-engine joins are pushed
+  into the DuckDB scan query.  EXPLAIN shows `Using where with pushed condition`.
+  Verified: 1-month date filter returns 12,488 rows instead of 300,000.
+- **Column subset scan**: `rnd_init()` reads `table->read_set` and emits `SELECT col1, col2`
+  instead of `SELECT *`, reducing data transfer for cross-engine joins.
 
-### ✅ Analytics Queries Work
-MariaDB pushes GROUP BY, SUM, COUNT, AVG down through the engine:
-```sql
-SELECT region, COUNT(*), SUM(revenue), AVG(revenue)
-FROM sales
-GROUP BY region
-ORDER BY total DESC;
-```
-Results are correct.
+### MariaDB Function Compatibility
+Macros installed into DuckDB at startup translate MariaDB function names:
+- `DATE_FORMAT`, `UNIX_TIMESTAMP`, `FROM_UNIXTIME`, `LAST_DAY`
+- `LOCATE`, `MID`, `SPACE`, `STRCMP`, `REGEXP_SUBSTR`, `FIND_IN_SET`
+- `IF`
+- `CHAR(n)` rewritten to `chr(n)` in the SQL rewrite pass
+- `<cache>(expr)` wrappers from MariaDB's AST printer stripped automatically
 
-### ✅ Data Type Support
+Macros live in `sql/duckdb_mariadb_compat.sql` — edit and redeploy without recompiling.
+
+### Data Type Support
 | MariaDB Type | DuckDB Type |
 |---|---|
 | TINYINT, SMALLINT, INT, MEDIUMINT | INTEGER |
@@ -37,56 +42,10 @@ Results are correct.
 | DATETIME, TIMESTAMP | TIMESTAMP |
 | VARCHAR, TEXT, BLOB, etc. | VARCHAR |
 
-### ✅ Build Environment
-- Build dir: `/home/shared/mariadb/mariadb-duckdb-plugin/build/`
-- Source dir: `/home/shared/mariadb/mariadb-duckdb-plugin/src/`
-- DuckDB library: `/home/shared/mariadb/mariadb-duckdb-plugin/lib/`
-- MariaDB source: `/home/erik/shared/mariadb/mariadb-11.8.3-git/`
-
-### ✅ Docker Environment
-- Base image `mariadb-duckdb-base:ubuntu` pinned to MariaDB **11.8.3**
-- Saved to `~/shared/docker_images/mariadb-duckdb-base-ubuntu.tar`
-- Plugin source mounted at `/plugin-src/`, MariaDB source at `/mariadb-src/`
-- Goal: test on other OS distros (Rocky Linux etc.) — not yet attempted
-
-## Known Limitations / Not Yet Implemented
-
-### ❌ Data Does Not Persist Across Server Restarts
-- The `.duckdb` file is created correctly on disk
-- However, when MariaDB reopens the table after restart, the `DuckDB_share`
-  is re-initialised but the table schema may not be re-created in the
-  in-memory DuckDB session — needs investigation
-- Workaround: `CREATE TABLE IF NOT EXISTS` in `build_create_sql` handles
-  re-creation, but this needs end-to-end testing after a restart
-
-### ❌ No UPDATE or DELETE
-- Both return `HA_ERR_WRONG_COMMAND`
-- Acceptable for an append-only analytics engine initially
-- Could be added later via DuckDB UPDATE/DELETE SQL
-
-### ❌ No Index Support
-- `max_supported_keys()` returns 0
-- MariaDB query optimiser falls back to full table scans for all queries
-- Acceptable for OLAP workloads
-
-### ❌ No SQL Pushdown to DuckDB
-- Complex WHERE, GROUP BY, and aggregations are evaluated by MariaDB
-  after fetching all rows via `rnd_next()`
-- True pushdown (sending the full query to DuckDB) would give much better
-  performance on large tables
-- Requires implementing the `engine_push()` / condition pushdown API
-
-### ❌ NULL Handling Not Fully Tested
-- NULL bits are cleared and set in `convert_row_from_duckdb()`
-- Not yet tested with nullable columns
-
-### ❌ No DECIMAL / DATE Type Round-Trip Testing
-- Written as strings, read back as strings via `val.ToString()`
-- Needs testing to confirm MariaDB accepts the format DuckDB returns
-
-### ❌ Docker Multi-OS Testing Not Done
-- Base image exists for Ubuntu 22.04 only
-- Rocky Linux / Debian images not yet built
+### Cross-Engine Joins
+MariaDB can join DUCKDB tables with InnoDB tables.  The optimizer uses `type=ALL` for the
+DuckDB table (intentional — see Architecture below) and `eq_ref` for InnoDB lookups.
+Condition pushdown reduces the rows DuckDB returns before the join.
 
 ## Architecture
 
@@ -96,48 +55,82 @@ Results are correct.
        ▼
 [MariaDB 11.8.3]  ← standard SQL interface
        │
-       ▼
-[ha_duckdb storage engine]  ← our plugin (ha_duckdb.so)
-       │  CREATE/INSERT via Appender
-       │  SELECT via MaterializedQueryResult
-       ▼
-[DuckDB embedded engine]  ← libduckdb.so
+       ├─ Pure-DUCKDB query ──► ha_duckdb_select_handler  (full pushdown, ~0.005s)
+       │
+       └─ Cross-engine join ──► ha_duckdb::rnd_init()      (batched scan)
+                                  cond_push() → WHERE in DuckDB query
+                                  read_set   → SELECT only needed columns
        │
        ▼
-[per-table .duckdb files]  ← on-disk columnar storage
+[DuckDB embedded engine]  ← libduckdb.so v1.0.0
+       │
+       ▼
+[#duckdb/global.duckdb]  ← one file per MariaDB database, on-disk columnar storage
 ```
+
+### Intentional Design: No MariaDB Index Scans
+`max_supported_keys()` returns 0.  MariaDB does not know about DuckDB indexes and cannot
+plan `type=ref` joins against them.  This is deliberate:
+- Exposing index capability would allow the optimizer to drive row-at-a-time index scans
+  through the handler API, bypassing DuckDB's vectorised execution entirely.
+- DuckDB's own planner uses indexes internally on pushed-down queries.
+- Cross-engine joins use `type=ALL` + a single batched `rnd_init()` call, which is correct.
+
+## Known Limitations
+
+| Area | Status |
+|---|---|
+| UPDATE / DELETE | Return `HA_ERR_WRONG_COMMAND` — append-only for now |
+| Index creation | Not yet implemented — `CREATE TABLE ... INDEX(col)` silently ignored |
+| Row estimates | `stats.records` always 0; EXPLAIN shows `rows=300000` even with pushdown |
+| NULL handling | Implemented but not exhaustively tested |
+| Persistence across restart | Works via `CREATE TABLE IF NOT EXISTS` in `create()` |
 
 ## File Layout
 
 ```
 mariadb-duckdb-plugin/
 ├── src/
-│   ├── ha_duckdb.h          # Storage engine header
 │   ├── ha_duckdb.cc         # Storage engine implementation
-│   └── CMakeLists.txt       # Standalone build (points at MariaDB source)
+│   ├── ha_duckdb.h          # Header
+│   └── CMakeLists.txt       # Standalone build (points at MariaDB source tree)
+├── sql/
+│   └── duckdb_mariadb_compat.sql  # MariaDB→DuckDB function macros (deployment artifact)
 ├── lib/
-│   ├── libduckdb.so         # Prebuilt DuckDB library
-│   ├── duckdb.h             # DuckDB C header
-│   └── duckdb.hpp           # DuckDB C++ header
-├── build/                   # cmake output (gitignored)
-│   └── libha_duckdb.so      # Compiled plugin
+│   ├── libduckdb.so         # DuckDB v1.0.0
+│   ├── duckdb.h / duckdb.hpp
+├── build/                   # cmake output — gitignored
+│   └── libha_duckdb.so
+├── data/                    # MariaDB data dir (bind-mounted into container) — gitignored
 ├── docker/
-│   ├── base-ubuntu.dockerfile   # MariaDB 11.8.3 + dev tools (Ubuntu)
-│   └── dev-ubuntu.dockerfile    # Development image
+│   └── base-ubuntu.dockerfile
 └── scripts/
-    └── docker-run.sh            # Start dev container
+    ├── deploy.sh            # Build + deploy into test container (USE THIS)
+    └── docker-run.sh        # Start dev container
 ```
 
-## Next Steps (Priority Order)
+## Development Workflow
 
-1. **Test persistence** — restart MariaDB, verify existing DUCKDB tables are
-   accessible and data survives
-2. **Test NULL columns** — create table with nullable fields, insert NULLs,
-   verify round-trip
-3. **Test DECIMAL and DATE round-trips** — confirm string-based storage gives
-   correct values back
-4. **Implement SQL pushdown** — route full SELECT queries to DuckDB for
-   performance on large tables
-5. **Rocky Linux Docker image** — build and test on a second OS
-6. **Parquet import/export** — allow `SELECT * FROM 'file.parquet'` style
-   queries via DuckDB's Parquet support
+See `DOCKER_WORKFLOW.md` for the full workflow.  The short version:
+
+```bash
+# Edit source locally
+vim src/ha_duckdb.cc
+
+# Build, deploy, restart MariaDB, verify — all in one step
+./scripts/deploy.sh
+
+# Connect and test
+docker exec -it duckdb-plugin-test mariadb -uroot -ptestpass
+```
+
+## Environment
+
+| Component | Location |
+|---|---|
+| Plugin source | `/home/shared/mariadb/mariadb-duckdb-plugin/src/` |
+| Build output | `/home/shared/mariadb/mariadb-duckdb-plugin/build/` |
+| MariaDB source | `/home/erik/shared/mariadb/mariadb-11.8.3-git/` |
+| DuckDB library | `/home/shared/mariadb/mariadb-duckdb-plugin/lib/` |
+| Test container | `duckdb-plugin-test` (Ubuntu 22.04, MariaDB 11.8.3) |
+| MariaDB data | `/home/shared/mariadb/mariadb-duckdb-plugin/data/` (bind-mounted) |

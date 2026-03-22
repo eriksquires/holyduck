@@ -1,72 +1,101 @@
 # Docker Development Workflow
 
-## Code Development Process
+## The One Command You Need
 
-### ✅ Code Changes (Local)
-- **Edit code locally** on host machine in `~/shared/mariadb/mariadb-duckdb-plugin/src/`
-- Plugin source files: `ha_duckdb.cc`, `ha_duckdb.h`, `CMakeLists.txt`
-- Changes are immediately visible inside Docker container via volume mount
-
-### ✅ Build Environment (Docker)
-- **Start container**: `./scripts/docker-run.sh ubuntu`
-- **Plugin source mounted**: `/plugin-src/` inside container
-- **MariaDB source available**: `/mariadb-src/` (read-only)
-- **Build happens inside container** with proper MariaDB headers and environment
-
-## Development Cycle
-
-### 1. Make Code Changes
 ```bash
-# Edit files locally with any editor
-vim ~/shared/mariadb/mariadb-duckdb-plugin/src/ha_duckdb.cc
+./scripts/deploy.sh
 ```
 
-### 2. Build Plugin
+This script handles the full lifecycle: build on host → copy into container →
+restart MariaDB → wait for ready → verify plugin loaded.  Run it after every
+code change.
+
+## Setup (first time only)
+
+### 1. Start the test container
+
 ```bash
-# Inside Docker container
-cd /plugin-src/src/
-# Build commands needed here - not yet documented
+./scripts/docker-run.sh ubuntu
 ```
 
-### 3. Install Plugin
+The container is named `duckdb-plugin-test`.  It bind-mounts:
+- `./data/` → `/var/lib/mysql` (MariaDB data, persists across restarts)
+- `./lib/`  → `/plugin-lib`   (libduckdb.so, read-only)
+- `./build/` → `/plugin-build` (built .so, read-only — for reference)
+
+### 2. Install the plugin (first deploy only)
+
 ```bash
-# Inside Docker container
-# Copy plugin to MariaDB plugin directory
-# Restart MariaDB or reload plugin
-# Install commands needed here - not yet documented
+./scripts/deploy.sh
 ```
 
-### 4. Test Plugin
-```bash
-# Inside Docker container
-mariadb -u root -p
-> SHOW ENGINES;  # Should show DUCKDB
-> CREATE TABLE test (...) ENGINE=DUCKDB;  # Currently fails
+On first run this builds the plugin, copies it to `/usr/lib/mysql/plugin/` inside
+the container, restarts MariaDB, and installs the plugin via `INSTALL PLUGIN`.
+Subsequent runs skip the install step if the plugin is already registered.
+
+## Day-to-Day Cycle
+
+```
+1. Edit  →  src/ha_duckdb.cc  (or ha_duckdb.h, duckdb_mariadb_compat.sql)
+2. Run   →  ./scripts/deploy.sh
+3. Test  →  docker exec -it duckdb-plugin-test mariadb -uroot -ptestpass
 ```
 
-## Current Gaps in Workflow
+## Connecting
 
-### ❌ Build Process Not Documented
-- Exact cmake/make commands to build plugin unknown
-- Integration with MariaDB build system unclear
-- Plugin compilation steps need to be figured out
+```bash
+# Interactive shell
+docker exec -it duckdb-plugin-test mariadb -uroot -ptestpass
 
-### ❌ Installation Process Not Documented  
-- How to install compiled plugin in MariaDB unknown
-- Plugin reload/restart process unclear
-- Installation automation needed
+# One-off query
+docker exec duckdb-plugin-test mariadb -uroot -ptestpass --ssl=0 -e "SHOW ENGINES;"
 
-### ❌ Testing Process Incomplete
-- Manual testing only
-- No automated test scripts
-- Error debugging workflow unclear
+# DuckDB CLI (inspect .duckdb files directly)
+docker exec duckdb-plugin-test duckdb /var/lib/mysql/\#duckdb/global.duckdb
+```
 
-## Next Priority: Complete the Workflow
+## Inspecting DuckDB State
 
-Focus on Ubuntu only. Figure out:
-1. **Build commands**: How to compile `ha_duckdb.so` inside container
-2. **Install commands**: How to get MariaDB to load the updated plugin
-3. **Test cycle**: Quick way to test changes
-4. **Script it**: Automate build/install/test cycle
+```bash
+# List all tables
+docker exec duckdb-plugin-test duckdb /var/lib/mysql/\#duckdb/global.duckdb \
+    "SHOW TABLES;"
 
-Goal: Fast iteration cycle for implementing storage engine methods.
+# List indexes
+docker exec duckdb-plugin-test duckdb /var/lib/mysql/\#duckdb/global.duckdb \
+    "SELECT index_name, table_name, sql FROM duckdb_indexes();"
+```
+
+## Checking Errors
+
+```bash
+# MariaDB error log (container hostname changes on recreate — use wildcard)
+docker exec duckdb-plugin-test bash -c "tail -30 /var/lib/mysql/*.err"
+```
+
+## Updating Compatibility Macros Only
+
+`sql/duckdb_mariadb_compat.sql` is a deployment artifact — it is copied to the
+plugin directory at build time and loaded by the plugin at startup.  To update
+macros without recompiling:
+
+```bash
+./scripts/deploy.sh   # redeploys the .sql file and restarts MariaDB
+```
+
+## Build Configuration
+
+The host-side build is a standalone CMake project under `src/`, pre-configured
+in `build/`.  Key paths (set in `build/CMakeCache.txt`):
+
+| Variable | Value |
+|---|---|
+| `MARIADB_SOURCE_DIR` | `/home/erik/shared/mariadb/mariadb-11.8.3-git` |
+| `MARIADB_BUILD_DIR` | `/home/erik/shared/mariadb/mariadb-11.8.3-git/build` |
+| `DUCKDB_DIR` | `<plugin-root>/lib` |
+
+To reconfigure (e.g. for a different MariaDB version):
+```bash
+cd build
+cmake ../src -DMARIADB_SOURCE_DIR=... -DMARIADB_BUILD_DIR=...
+```

@@ -57,6 +57,10 @@ RUN echo "[mysqld]" > /etc/mysql/mariadb.conf.d/50-server.cnf \
 && echo "innodb_buffer_pool_size = 512M" >> /etc/mysql/mariadb.conf.d/50-server.cnf \
 && echo "max_connections = 100" >> /etc/mysql/mariadb.conf.d/50-server.cnf
 
+# Install DuckDB CLI
+RUN curl https://install.duckdb.org | sh \
+ && ln -s /root/.duckdb/cli/latest/duckdb /usr/local/bin/duckdb
+
 # Create workspace directories
 WORKDIR /workspace
 RUN mkdir -p /plugin-src /mariadb-src /build
