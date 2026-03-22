@@ -148,4 +148,9 @@ See [TECHNICAL.md](TECHNICAL.md) for full details on architecture and internals.
 
 ## License
 
-[MIT](LICENSE)
+This project is dual-licensed:
+
+- **[GPL v2](LICENSE)** — free to use under the terms of the GNU General Public License v2.
+  Any derivative works must also be GPL v2.
+- **[Commercial License](LICENSE-COMMERCIAL)** — for use in proprietary or closed-source
+  products without GPL obligations. Contact for pricing and terms.

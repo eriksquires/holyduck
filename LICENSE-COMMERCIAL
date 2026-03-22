@@ -1,0 +1,23 @@
+Commercial License for ha_duckdb
+
+Copyright (C) 2026 Erik. All rights reserved.
+
+This software is dual-licensed under the GNU General Public License v2 (GPL v2)
+and a Commercial License.
+
+Under the GPL v2, you may use, modify, and distribute this software provided
+that all derivative works are also licensed under the GPL v2. See LICENSE for
+the full GPL v2 terms.
+
+A Commercial License is available for organizations that:
+- Cannot or do not wish to comply with the GPL v2 terms
+- Wish to use this software in a proprietary or closed-source product
+- Require commercial support or indemnification
+
+For commercial licensing inquiries, please contact:
+
+  [your contact email]
+
+The Commercial License grants you the right to use, modify, and distribute
+this software in proprietary applications without the GPL v2 obligations,
+subject to the terms agreed in a separate commercial license agreement.
