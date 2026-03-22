@@ -1055,6 +1055,66 @@ static std::string rewrite_func_name(const std::string &sql,
   return out;
 }
 
+// Strip the leading database qualifier from three-part column references.
+//
+// MariaDB's select_lex->print() emits column refs as "db"."alias"."col"
+// when the query uses table aliases (e.g. in joins).  DuckDB only understands
+// two-part "alias"."col" — it tries to look up "db"."alias" as a real table
+// and fails with "Referenced table not found".
+//
+// Two-part table refs in FROM clauses ("db"."table") are unchanged because
+// they are exactly two quoted identifiers and are not matched by the
+// three-part pattern.
+static std::string strip_db_qualifier(const std::string &sql)
+{
+  std::string out;
+  out.reserve(sql.size());
+  size_t i= 0, n= sql.size();
+
+  while (i < n)
+  {
+    if (sql[i] != '"') { out += sql[i++]; continue; }
+
+    // Read first quoted identifier p1
+    size_t p1s= i++;
+    while (i < n && sql[i] != '"') i++;
+    if (i < n) i++;                              // closing "
+    size_t p1e= i;
+
+    // Not followed by ."  — output p1 as-is
+    if (i >= n || sql[i] != '.' || i + 1 >= n || sql[i + 1] != '"')
+    { out += sql.substr(p1s, p1e - p1s); continue; }
+
+    // Read second quoted identifier p2
+    i++;                                         // skip '.'
+    size_t p2s= i++;
+    while (i < n && sql[i] != '"') i++;
+    if (i < n) i++;
+    size_t p2e= i;
+
+    // Only two parts — output p1.p2 unchanged
+    if (i >= n || sql[i] != '.' || i + 1 >= n || sql[i + 1] != '"')
+    {
+      out += sql.substr(p1s, p1e - p1s);
+      out += '.';
+      out += sql.substr(p2s, p2e - p2s);
+      continue;
+    }
+
+    // Three parts: read p3 and drop p1 — output p2.p3 only
+    i++;                                         // skip '.'
+    size_t p3s= i++;
+    while (i < n && sql[i] != '"') i++;
+    if (i < n) i++;
+    size_t p3e= i;
+
+    out += sql.substr(p2s, p2e - p2s);
+    out += '.';
+    out += sql.substr(p3s, p3e - p3s);
+  }
+  return out;
+}
+
 // Apply all MariaDB→DuckDB function rewrites in one pass.
 static std::string rewrite_mariadb_sql(const std::string &sql)
 {
@@ -1066,6 +1126,9 @@ static std::string rewrite_mariadb_sql(const std::string &sql)
   // cannot satisfy.
   // str_to_date(str, fmt) → strptime(str, fmt)
   // strptime() requires a constant format — can't use a macro parameter.
+  s= strip_db_qualifier(s);
+
+  // str_to_date(str, fmt) → strptime(str, fmt)
   s= rewrite_func_name(s, "str_to_date", "strptime");
 
   // char(n) → chr(n)

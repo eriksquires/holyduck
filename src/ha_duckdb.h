@@ -133,9 +133,18 @@ public:
   }
 
   uint max_supported_record_length() const { return HA_MAX_REC_LENGTH; }
-  uint max_supported_keys()          const { return 64; }
-  uint max_supported_key_parts()     const { return 16; }
-  uint max_supported_key_length()    const { return 3072; }
+  // Returning 0 here tells MariaDB this engine has no indexes, which prevents
+  // it from planning ref or range joins against DuckDB tables.  Without this,
+  // the optimizer would plan a ref join (type=ref) and then fail at runtime
+  // when index_read_map() is called — we return HA_ERR_WRONG_COMMAND because
+  // row-at-a-time index scans bypass DuckDB's vectorised execution entirely.
+  //
+  // DuckDB indexes are still created internally (see create()) and used by
+  // DuckDB's own query planner on pushed-down queries.  MariaDB simply never
+  // learns they exist, so it cannot misuse them.
+  uint max_supported_keys()          const { return 0; }
+  uint max_supported_key_parts()     const { return 0; }
+  uint max_supported_key_length()    const { return 0; }
 
   IO_AND_CPU_COST scan_time()
   {
