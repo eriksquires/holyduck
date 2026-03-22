@@ -15,9 +15,12 @@
 #include <string>
 #include <sstream>
 #include <map>
+#include <fstream>
+#include <vector>
 
-// MariaDB global — absolute path to the data directory (trailing slash)
-extern char mysql_real_data_home[];
+// MariaDB globals
+extern char mysql_real_data_home[];  // absolute path to data directory
+extern char opt_plugin_dir[];        // absolute path to plugin directory
 
 // Forward declare sysvar so registry_get() can reference it
 static ulong duckdb_max_threads;
@@ -44,54 +47,86 @@ static mysql_mutex_t g_duckdb_mutex;
 // MariaDB datetime/string function names work transparently in DuckDB.
 // Uses CREATE OR REPLACE MACRO so re-opening the file after an upgrade
 // always refreshes the definitions.
+//
+// Primary source: <plugin_dir>/duckdb_mariadb_compat.sql  (editable without
+//                 recompiling — add or fix macros, restart MariaDB)
+// Fallback:       the built-in list below, used when the file is absent.
 // ---------------------------------------------------------------------------
+
+// Split a SQL file on ';', stripping -- line comments and blank lines.
+static std::vector<std::string> parse_sql_statements(const std::string &text)
+{
+  std::vector<std::string> stmts;
+  std::string current;
+  std::istringstream stream(text);
+  std::string line;
+
+  while (std::getline(stream, line))
+  {
+    // Strip inline -- comments
+    size_t comment= line.find("--");
+    if (comment != std::string::npos)
+      line= line.substr(0, comment);
+
+    current += line + ' ';
+
+    // Each ';' ends a statement
+    size_t pos;
+    while ((pos= current.find(';')) != std::string::npos)
+    {
+      std::string stmt= current.substr(0, pos);
+      current= current.substr(pos + 1);
+
+      // Trim whitespace
+      size_t s= stmt.find_first_not_of(" \t\r\n");
+      if (s != std::string::npos)
+        stmts.push_back(stmt.substr(s));
+    }
+  }
+  return stmts;
+}
+
+static void run_macro_statements(duckdb::Connection &conn,
+                                 const std::vector<std::string> &stmts,
+                                 const char *source)
+{
+  for (const auto &sql : stmts)
+  {
+    auto r= conn.Query(sql);
+    if (r->HasError())
+      sql_print_warning("DuckDB: compat macro failed (%s): %s — %s",
+                        source, sql.c_str(), r->GetError().c_str());
+  }
+}
+
 static void install_mariadb_compat_macros(duckdb::DuckDB *db)
 {
   duckdb::Connection conn(*db);
 
-  // Each entry is a complete CREATE OR REPLACE MACRO statement.
+  // Try the external SQL file first.
+  std::string sql_file= std::string(opt_plugin_dir) + "/duckdb_mariadb_compat.sql";
+  std::ifstream f(sql_file);
+  if (f.good())
+  {
+    std::string text((std::istreambuf_iterator<char>(f)),
+                      std::istreambuf_iterator<char>());
+    auto stmts= parse_sql_statements(text);
+    run_macro_statements(conn, stmts, sql_file.c_str());
+    sql_print_information("DuckDB: loaded compat macros from %s (%zu statements)",
+                          sql_file.c_str(), stmts.size());
+    return;
+  }
+
+  // File not found — fall back to built-in definitions.
+  sql_print_information("DuckDB: %s not found, using built-in compat macros",
+                        sql_file.c_str());
+
   static const char *macros[]= {
-    // -----------------------------------------------------------------------
-    // Date/time formatting
-    // -----------------------------------------------------------------------
-    // MariaDB: DATE_FORMAT(date, format)
-    // DuckDB:  strftime(format, timestamp)  — argument order is reversed
     "CREATE OR REPLACE MACRO date_format(d, fmt) AS strftime(fmt, d::TIMESTAMP)",
-
-    // MariaDB: STR_TO_DATE(str, format)
-    // NOTE: DuckDB's strptime() requires a constant format string — a
-    // parameterised macro cannot satisfy that.  STR_TO_DATE is therefore not
-    // pushed down; MariaDB evaluates it on the server side instead.
-
-    // -----------------------------------------------------------------------
-    // Unix epoch conversions
-    // -----------------------------------------------------------------------
-    // MariaDB: UNIX_TIMESTAMP(datetime)  →  seconds since epoch
-    // epoch() is a DuckDB built-in; safe in macro bodies even though
-    // MariaDB would reject it in direct SQL.
-    // NOTE: do NOT register a 0-arg unix_timestamp() — DuckDB v1.0 does not
-    // support macro overloading by arity, and a 0-arg macro would shadow
-    // this 1-arg one.  MariaDB evaluates UNIX_TIMESTAMP() itself anyway.
     "CREATE OR REPLACE MACRO unix_timestamp(d) AS epoch(d::TIMESTAMP)::BIGINT",
-
-    // MariaDB: FROM_UNIXTIME(n)  →  DATETIME from epoch seconds
-    // make_timestamp() takes microseconds; multiply seconds by 1_000_000
     "CREATE OR REPLACE MACRO from_unixtime(n) AS make_timestamp(n::BIGINT * 1000000)",
-
-    // -----------------------------------------------------------------------
-    // Date arithmetic helpers
-    // -----------------------------------------------------------------------
-    // MariaDB: LAST_DAY(date)  →  last day of that month
     "CREATE OR REPLACE MACRO last_day(d) AS "
-    "(date_trunc('month', d::DATE) + INTERVAL 1 MONTH - INTERVAL 1 DAY)::DATE",
-
-    // MariaDB: PERIOD_DIFF(p1, p2)  →  months between YYYYMM periods
-    // Not a clean single-expression macro; skip for now.
-
-    // -----------------------------------------------------------------------
-    // Numeric / general
-    // -----------------------------------------------------------------------
-    // MariaDB: IF(cond, true_val, false_val)
+      "(date_trunc('month', d::DATE) + INTERVAL 1 MONTH - INTERVAL 1 DAY)::DATE",
     "CREATE OR REPLACE MACRO if(cond, a, b) AS CASE WHEN cond THEN a ELSE b END",
   };
 
@@ -99,7 +134,7 @@ static void install_mariadb_compat_macros(duckdb::DuckDB *db)
   {
     auto r= conn.Query(sql);
     if (r->HasError())
-      sql_print_warning("DuckDB: failed to install compat macro: %s — %s",
+      sql_print_warning("DuckDB: failed to install built-in compat macro: %s — %s",
                         sql, r->GetError().c_str());
   }
 }

@@ -31,12 +31,13 @@ add_definitions(
 include_directories(
   ${MARIADB_SOURCE_DIR}/wsrep-lib/include
   ${MARIADB_SOURCE_DIR}/wsrep-lib/wsrep-API/v26
-  ${MARIADB_BUILD_DIR}/include          # generated: my_config.h, mysql_version.h
+  ${MARIADB_BUILD_DIR}/include                    # generated: my_config.h, mysql_version.h
+  ${MARIADB_BUILD_DIR}/libmariadb/include         # generated: mariadb_version.h
   ${MARIADB_SOURCE_DIR}/include/providers
   ${MARIADB_SOURCE_DIR}/include
   ${MARIADB_SOURCE_DIR}/sql
   ${MARIADB_BUILD_DIR}/sql
-  ${DUCKDB_DIR}                         # duckdb.hpp, duckdb.h
+  ${DUCKDB_DIR}                                   # duckdb.hpp, duckdb.h
 )
 
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} \
@@ -56,3 +57,11 @@ message(STATUS "Plugin will be built at: ${CMAKE_CURRENT_BINARY_DIR}/ha_duckdb.s
 message(STATUS "MariaDB source: ${MARIADB_SOURCE_DIR}")
 message(STATUS "MariaDB build:  ${MARIADB_BUILD_DIR}")
 message(STATUS "DuckDB dir:     ${DUCKDB_DIR}")
+
+# Copy the companion SQL macro file next to the built .so so it can be
+# deployed alongside it and found at runtime via opt_plugin_dir.
+configure_file(
+  ${CMAKE_CURRENT_SOURCE_DIR}/../sql/duckdb_mariadb_compat.sql
+  ${CMAKE_CURRENT_BINARY_DIR}/duckdb_mariadb_compat.sql
+  COPYONLY
+)
