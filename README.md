@@ -1,6 +1,6 @@
-# ha_duckdb — DuckDB Storage Engine for MariaDB
+# HolyDuck — DuckDB Storage Engine for MariaDB
 
-A MariaDB storage engine plugin that embeds [DuckDB](https://duckdb.org/) as a first-class storage engine. Create tables with `ENGINE=DUCKDB` and query them with standard SQL — DuckDB handles the heavy lifting.
+**HolyDuck** (`ha_duckdb`) is a MariaDB storage engine plugin that embeds [DuckDB](https://duckdb.org/) as a first-class storage engine. Create tables with `ENGINE=DUCKDB` and query them with standard SQL — DuckDB handles the heavy lifting.
 
 ## Why
 
@@ -98,7 +98,7 @@ SELECT AVG(val) FROM t;
 
 ## Pre-built Binaries
 
-Pre-built `.so` files for each distro are available on the [Releases](../../releases) page. Download the appropriate file, place it in your MariaDB plugin directory, and:
+Pre-built `.so` files for each distro are available on the [Releases](https://github.com/eriksquires/HolyDuck/releases) page. Download the appropriate file, place it in your MariaDB plugin directory, and:
 
 ```sql
 INSTALL PLUGIN duckdb SONAME 'ha_duckdb.so';
