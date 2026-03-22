@@ -74,6 +74,8 @@ MARIADB_VERSION=11.8.3 DUCKDB_VERSION=v1.5.0 ./scripts/fetch-deps.sh
 
 ### 4. Build MariaDB and configure the plugin (first time only, ~20-30 min)
 
+Note that this is not optional.  Required header files are built by this step, so even if you don't really want to build the whole DB you have to, but only once per target OS/DB version. 
+
 ```bash
 ./scripts/cmake-setup.sh duckdb-plugin-dev-ubuntu
 ```
@@ -159,6 +161,26 @@ Edit the file and redeploy without recompiling.
 | Cross-engine aggregation | Wrap in a CTE to push aggregation into DuckDB (`PUSHED DERIVED`) |
 
 See [TECHNICAL.md](TECHNICAL.md) for full details on architecture and internals.
+
+## HolyDuck vs ColumnStore
+
+MariaDB's ColumnStore is the other analytical storage engine in this space. Here's how they compare:
+
+| | HolyDuck | ColumnStore |
+|---|---|---|
+| Concurrent writers | Single writer (DuckDB limitation) | Parallel ingestion |
+| High availability | None — local file only | MariaDB replication + clustering |
+| Multi-server | Single node | Distributed across nodes |
+| Deployment | Drop in a `.so` file | Full cluster infrastructure |
+| Query speed (single node) | DuckDB — extremely fast | Fast, but more overhead |
+| Setup complexity | Minutes | Hours to days |
+| ETL tooling | Standard SQL | Bulk loaders, S3, enterprise tooling |
+
+**HolyDuck's sweet spot:** single-node analytics alongside InnoDB. Big overnight ETL jobs, exploratory data analysis during the day, million-to-billion row scans that return small aggregated results — all without standing up any infrastructure.
+
+**ColumnStore's sweet spot:** when you've outgrown a single node and need HA, replication, and multi-server distribution.
+
+If your workload fits on one machine, HolyDuck will likely be faster and infinitely simpler to run.
 
 ## License
 
