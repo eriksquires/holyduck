@@ -3,6 +3,7 @@
 #include "probes_mysql.h"
 #include "sql_class.h"
 #include "sql_lex.h"
+#include "key.h"
 
 // DuckDB includes — undef UNKNOWN macro from MariaDB's item_cmpfunc.h
 // to avoid collision with DuckDB's enum values
@@ -714,11 +715,150 @@ int ha_duckdb::info(uint flag)
   DBUG_RETURN(0);
 }
 
-ha_rows ha_duckdb::records_in_range(uint, const key_range *, const key_range *,
-                                    page_range *)
+// ---------------------------------------------------------------------------
+// records_in_range helpers
+// ---------------------------------------------------------------------------
+
+// Convert a Field's current value (after key_restore) to a DuckDB SQL literal
+static std::string field_to_sql_literal(Field *field)
+{
+  if (field->is_null()) return "NULL";
+
+  std::ostringstream out;
+  switch (field->type())
+  {
+    case MYSQL_TYPE_TINY:
+    case MYSQL_TYPE_SHORT:
+    case MYSQL_TYPE_LONG:
+    case MYSQL_TYPE_INT24:
+    case MYSQL_TYPE_LONGLONG:
+      out << field->val_int();
+      break;
+    case MYSQL_TYPE_FLOAT:
+    case MYSQL_TYPE_DOUBLE:
+    {
+      char buf[64];
+      snprintf(buf, sizeof(buf), "%.15g", field->val_real());
+      out << buf;
+      break;
+    }
+    default:
+    {
+      String s;
+      field->val_str(&s, &s);
+      out << "'";
+      for (uint i= 0; i < s.length(); i++)
+      {
+        if (s.ptr()[i] == '\'') out << "''";
+        else out << s.ptr()[i];
+      }
+      out << "'";
+    }
+  }
+  return out.str();
+}
+
+// Build a WHERE clause fragment from a key_range
+static std::string key_range_to_where(TABLE *table, KEY *key_info,
+                                      const key_range *kr, bool is_max)
+{
+  // Restore packed key bytes into record[0] so fields can be read
+  key_restore(table->record[0], kr->key, key_info, kr->length);
+
+  // Count how many key parts are covered by this key
+  uint used_parts= 0;
+  uint remaining= kr->length;
+  for (uint i= 0; i < key_info->user_defined_key_parts && remaining > 0; i++)
+  {
+    used_parts++;
+    uint store_len= key_info->key_part[i].store_length;
+    remaining= (remaining >= store_len) ? remaining - store_len : 0;
+  }
+
+  // Map flag to SQL operator
+  const char *op;
+  switch (kr->flag)
+  {
+    case HA_READ_KEY_EXACT:      op= "=";  break;
+    case HA_READ_KEY_OR_NEXT:    op= ">="; break;
+    case HA_READ_AFTER_KEY:      op= ">";  break;
+    case HA_READ_KEY_OR_PREV:    op= "<="; break;
+    case HA_READ_BEFORE_KEY:     op= "<";  break;
+    default:                     op= is_max ? "<=" : ">="; break;
+  }
+
+  std::ostringstream where;
+  for (uint i= 0; i < used_parts; i++)
+  {
+    Field *field= key_info->key_part[i].field;
+    if (i > 0) where << " AND ";
+    where << '"' << field->field_name.str << '"';
+    where << " " << (i < used_parts - 1 ? "=" : op) << " ";
+    where << field_to_sql_literal(field);
+  }
+  return where.str();
+}
+
+ha_rows ha_duckdb::records_in_range(uint inx, const key_range *min_key,
+                                    const key_range *max_key, page_range *)
 {
   DBUG_ENTER("ha_duckdb::records_in_range");
-  DBUG_RETURN(stats.records ? stats.records : 10);
+
+  if (!connection || (!min_key && !max_key))
+    DBUG_RETURN(stats.records ? stats.records : 10);
+
+  try
+  {
+    KEY *key_info= &table->key_info[inx];
+
+    // Build WHERE clause from key ranges
+    std::string conditions;
+    if (min_key)
+    {
+      conditions= key_range_to_where(table, key_info, min_key, false);
+    }
+    if (max_key)
+    {
+      std::string max_cond= key_range_to_where(table, key_info, max_key, true);
+      if (!conditions.empty() && !max_cond.empty())
+        conditions += " AND " + max_cond;
+      else if (!max_cond.empty())
+        conditions= max_cond;
+    }
+
+    // Ask DuckDB's query planner for its row estimate via EXPLAIN
+    std::string sql= "EXPLAIN SELECT * FROM " + duckdb_table_name;
+    if (!conditions.empty())
+      sql += " WHERE " + conditions;
+
+    auto r= connection->Query(sql);
+    if (r->HasError() || r->RowCount() == 0)
+      DBUG_RETURN(stats.records ? stats.records : 10);
+
+    // Parse estimated cardinality from explain_value (column 1)
+    // DuckDB v1.0 renders it as "EC: NNN" in the text plan
+    std::string plan= r->GetValue(1, 0).ToString();
+    const std::string ec_tag= "EC: ";
+    size_t pos= plan.find(ec_tag);
+    if (pos == std::string::npos)
+      DBUG_RETURN(stats.records ? stats.records : 10);
+
+    pos += ec_tag.length();
+    // Read digits until non-digit
+    std::string num;
+    while (pos < plan.size() && isdigit((unsigned char)plan[pos]))
+      num += plan[pos++];
+
+    if (num.empty())
+      DBUG_RETURN(stats.records ? stats.records : 10);
+
+    ha_rows estimate= (ha_rows)std::stoull(num);
+    DBUG_RETURN(estimate ? estimate : 1);
+  }
+  catch (...)
+  {
+    DBUG_RETURN(stats.records ? stats.records : 10);
+  }
 }
 
 int ha_duckdb::analyze(THD *, HA_CHECK_OPT *)
