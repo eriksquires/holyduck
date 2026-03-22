@@ -62,12 +62,16 @@ class ha_duckdb: public handler
   // Stored as void* to avoid needing full duckdb.hpp in the header
   void* bulk_appender;
 
-  // Condition pushdown — set by cond_push(), used in rnd_init()
+  // Condition pushdown — set by cond_push(), used in rnd_init() and direct DML
   std::string pushed_where;
 
   // Column subset for scans — maps DuckDB result column index → MariaDB
   // field index.  Empty means SELECT * (all fields, sequential mapping).
   std::vector<uint> scan_field_map;
+
+  // Direct UPDATE state — field/value lists captured via info_push()
+  List<Item> *update_fields;
+  List<Item> *update_values;
 
   // Per-open metadata (public so create_duckdb_select_handler can read them)
 public:
@@ -95,6 +99,7 @@ public:
   int create(const char *name, TABLE *table_arg, HA_CREATE_INFO *create_info);
   int delete_table(const char *name);
   int rename_table(const char *from, const char *to);
+  int truncate() override;
 
   void start_bulk_insert(ha_rows rows, uint flags);
   int  end_bulk_insert();
@@ -120,6 +125,14 @@ public:
   const COND *cond_push(const COND *cond) override;
   void        cond_pop()                  override;
 
+  int info_push(uint info_type, void *info) override;
+
+  int direct_update_rows_init(List<Item> *update_fields) override;
+  int direct_update_rows(ha_rows *update_rows, ha_rows *found_rows) override;
+
+  int direct_delete_rows_init() override;
+  int direct_delete_rows(ha_rows *delete_rows) override;
+
   enum_alter_inplace_result
   check_if_supported_inplace_alter(TABLE *altered_table,
                                    Alter_inplace_info *ha_alter_info) override;
@@ -132,7 +145,8 @@ public:
   ulonglong table_flags() const
   {
     return (HA_REC_NOT_IN_SEQ | HA_NO_BLOBS | HA_BINLOG_STMT_CAPABLE |
-            HA_NULL_IN_KEY | HA_CAN_TABLE_CONDITION_PUSHDOWN);
+            HA_NULL_IN_KEY | HA_CAN_TABLE_CONDITION_PUSHDOWN |
+            HA_CAN_DIRECT_UPDATE_AND_DELETE);
   }
 
   ulong index_flags(uint inx, uint part, bool all_parts) const

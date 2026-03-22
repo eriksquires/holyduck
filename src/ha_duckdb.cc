@@ -304,7 +304,7 @@ static int duckdb_init_func(void *p)
   duckdb_hton= (handlerton *)p;
   duckdb_hton->create=        create_duckdb_handler;
   duckdb_hton->create_select= create_duckdb_select_handler;
-  duckdb_hton->flags=         HTON_CAN_RECREATE;
+  duckdb_hton->flags=         0;
   duckdb_hton->tablefile_extensions= ha_duckdb_exts;
 
   DBUG_RETURN(0);
@@ -374,6 +374,27 @@ err:
   DBUG_RETURN(tmp_share);
 }
 
+static const char *field_type_to_duckdb(Field *field)
+{
+  switch (field->type())
+  {
+    case MYSQL_TYPE_TINY:
+    case MYSQL_TYPE_SHORT:
+    case MYSQL_TYPE_LONG:
+    case MYSQL_TYPE_INT24:      return "INTEGER";
+    case MYSQL_TYPE_LONGLONG:   return "BIGINT";
+    case MYSQL_TYPE_FLOAT:      return "FLOAT";
+    case MYSQL_TYPE_DOUBLE:     return "DOUBLE";
+    case MYSQL_TYPE_DECIMAL:
+    case MYSQL_TYPE_NEWDECIMAL: return "DECIMAL";
+    case MYSQL_TYPE_DATE:       return "DATE";
+    case MYSQL_TYPE_TIME:       return "TIME";
+    case MYSQL_TYPE_DATETIME:
+    case MYSQL_TYPE_TIMESTAMP:  return "TIMESTAMP";
+    default:                    return "VARCHAR";
+  }
+}
+
 std::string ha_duckdb::build_create_sql(TABLE *table_arg)
 {
   std::ostringstream sql;
@@ -383,25 +404,7 @@ std::string ha_duckdb::build_create_sql(TABLE *table_arg)
   {
     Field *field= table_arg->field[i];
     if (i > 0) sql << ", ";
-    sql << field->field_name.str << " ";
-
-    switch (field->type())
-    {
-      case MYSQL_TYPE_TINY:
-      case MYSQL_TYPE_SHORT:
-      case MYSQL_TYPE_LONG:
-      case MYSQL_TYPE_INT24:   sql << "INTEGER";   break;
-      case MYSQL_TYPE_LONGLONG: sql << "BIGINT";   break;
-      case MYSQL_TYPE_FLOAT:   sql << "FLOAT";     break;
-      case MYSQL_TYPE_DOUBLE:  sql << "DOUBLE";    break;
-      case MYSQL_TYPE_DECIMAL:
-      case MYSQL_TYPE_NEWDECIMAL: sql << "DECIMAL"; break;
-      case MYSQL_TYPE_DATE:    sql << "DATE";       break;
-      case MYSQL_TYPE_TIME:    sql << "TIME";       break;
-      case MYSQL_TYPE_DATETIME:
-      case MYSQL_TYPE_TIMESTAMP: sql << "TIMESTAMP"; break;
-      default:                 sql << "VARCHAR";
-    }
+    sql << '"' << field->field_name.str << "\" " << field_type_to_duckdb(field);
   }
   sql << ")";
   return sql.str();
@@ -544,6 +547,19 @@ int ha_duckdb::delete_table(const char *name)
   DBUG_RETURN(0);
 }
 
+int ha_duckdb::truncate()
+{
+  DBUG_ENTER("ha_duckdb::truncate");
+  auto r= connection->Query("TRUNCATE " + duckdb_table_name);
+  if (r->HasError())
+  {
+    sql_print_error("DuckDB: TRUNCATE failed: %s",
+                    r->GetErrorObject().Message().c_str());
+    DBUG_RETURN(HA_ERR_INTERNAL_ERROR);
+  }
+  DBUG_RETURN(0);
+}
+
 int ha_duckdb::rename_table(const char *from, const char *to)
 {
   DBUG_ENTER("ha_duckdb::rename_table");
@@ -572,6 +588,13 @@ int ha_duckdb::rename_table(const char *from, const char *to)
 void ha_duckdb::start_bulk_insert(ha_rows rows, uint flags)
 {
   if (!connection) return;
+
+  // For REPLACE, skip the Appender — write_row() will use INSERT OR REPLACE
+  THD *thd= table->in_use;
+  if (thd && (thd->lex->sql_command == SQLCOM_REPLACE ||
+              thd->lex->sql_command == SQLCOM_REPLACE_SELECT))
+    return;
+
   try
   {
     bulk_appender= new duckdb::Appender(*connection, db_name,
@@ -594,9 +617,12 @@ int ha_duckdb::end_bulk_insert()
   }
   catch (const std::exception &e)
   {
-    sql_print_error("DuckDB: end_bulk_insert flush failed: %s", e.what());
     delete app;
     bulk_appender= nullptr;
+    std::string msg= e.what();
+    if (msg.find("\"exception_type\":\"Constraint\"") != std::string::npos)
+      return HA_ERR_FOUND_DUPP_KEY;
+    sql_print_error("DuckDB: end_bulk_insert flush failed: %s", e.what());
     return HA_ERR_INTERNAL_ERROR;
   }
   delete app;
@@ -613,68 +639,212 @@ int ha_duckdb::write_row(const uchar *buf)
   DBUG_ENTER("ha_duckdb::write_row");
   if (!connection) DBUG_RETURN(HA_ERR_INTERNAL_ERROR);
 
-  try
+  // Bulk path: use Appender (fast, no constraint checking — caller ensures clean data)
+  if (bulk_appender)
   {
-    // Reuse the bulk appender if open, otherwise use a one-shot
-    std::unique_ptr<duckdb::Appender> one_shot;
-    duckdb::Appender *appender= static_cast<duckdb::Appender*>(bulk_appender);
-    if (!appender)
+    try
     {
-      one_shot.reset(new duckdb::Appender(*connection, db_name,
-                                          table->s->table_name.str));
-      appender= one_shot.get();
+      duckdb::Appender *appender= static_cast<duckdb::Appender*>(bulk_appender);
+      appender->BeginRow();
+      for (uint i= 0; i < table->s->fields; i++)
+      {
+        Field *field= table->field[i];
+        if (field->is_null()) { appender->Append<nullptr_t>(nullptr); continue; }
+        switch (field->type())
+        {
+          case MYSQL_TYPE_TINY:
+          case MYSQL_TYPE_SHORT:
+          case MYSQL_TYPE_LONG:
+          case MYSQL_TYPE_INT24:
+            appender->Append<int32_t>((int32_t)field->val_int()); break;
+          case MYSQL_TYPE_LONGLONG:
+            appender->Append<int64_t>(field->val_int()); break;
+          case MYSQL_TYPE_FLOAT:
+            appender->Append<float>((float)field->val_real()); break;
+          case MYSQL_TYPE_DOUBLE:
+            appender->Append<double>(field->val_real()); break;
+          default:
+          {
+            String s; field->val_str(&s, &s);
+            appender->Append(duckdb::Value(std::string(s.ptr(), s.length())));
+            break;
+          }
+        }
+      }
+      appender->EndRow();
     }
+    catch (const std::exception &e)
+    {
+      std::string msg= e.what();
+      if (msg.find("\"exception_type\":\"Constraint\"") != std::string::npos)
+        DBUG_RETURN(HA_ERR_FOUND_DUPP_KEY);
+      sql_print_error("DuckDB: write_row (bulk) failed: %s", e.what());
+      DBUG_RETURN(HA_ERR_INTERNAL_ERROR);
+    }
+    DBUG_RETURN(0);
+  }
 
-    appender->BeginRow();
-
+  // Single-row path: use SQL INSERT so DuckDB enforces PK/UNIQUE constraints
+  {
+    std::ostringstream sql;
+    THD *thd= table->in_use;
+    bool is_replace= thd && (thd->lex->sql_command == SQLCOM_REPLACE ||
+                             thd->lex->sql_command == SQLCOM_REPLACE_SELECT);
+    sql << (is_replace ? "INSERT OR REPLACE INTO " : "INSERT INTO ")
+        << duckdb_table_name << " VALUES (";
     for (uint i= 0; i < table->s->fields; i++)
     {
       Field *field= table->field[i];
-      if (field->is_null()) { appender->Append<nullptr_t>(nullptr); continue; }
-
+      if (i > 0) sql << ", ";
+      if (field->is_null()) { sql << "NULL"; continue; }
       switch (field->type())
       {
         case MYSQL_TYPE_TINY:
         case MYSQL_TYPE_SHORT:
         case MYSQL_TYPE_LONG:
         case MYSQL_TYPE_INT24:
-          appender->Append<int32_t>((int32_t)field->val_int()); break;
+          sql << (int32_t)field->val_int(); break;
         case MYSQL_TYPE_LONGLONG:
-          appender->Append<int64_t>(field->val_int()); break;
+          sql << field->val_int(); break;
         case MYSQL_TYPE_FLOAT:
-          appender->Append<float>((float)field->val_real()); break;
         case MYSQL_TYPE_DOUBLE:
-          appender->Append<double>(field->val_real()); break;
+          sql << field->val_real(); break;
         default:
         {
           String s; field->val_str(&s, &s);
-          appender->Append(duckdb::Value(std::string(s.ptr(), s.length())));
+          std::string v(s.ptr(), s.length());
+          sql << '\'';
+          for (char c : v) { if (c == '\'') sql << '\''; sql << c; }
+          sql << '\'';
+          break;
+        }
+      }
+    }
+    sql << ")";
+
+    auto r= connection->Query(sql.str());
+    if (r->HasError())
+    {
+      if (r->GetErrorObject().Type() == duckdb::ExceptionType::CONSTRAINT)
+        DBUG_RETURN(HA_ERR_FOUND_DUPP_KEY);
+      sql_print_error("DuckDB: write_row failed: %s",
+                      r->GetErrorObject().Message().c_str());
+      DBUG_RETURN(HA_ERR_INTERNAL_ERROR);
+    }
+    DBUG_RETURN(0);
+  }
+}
+
+// Serialize all fields from buf into a DuckDB SQL fragment of the form:
+//   "col1"=val1 AND "col2"=val2 ...   (for WHERE clauses)
+//   "col1"=val1, "col2"=val2 ...      (for SET clauses, sep=", ")
+// Uses move_field_offset() to read values from an arbitrary row buffer.
+static std::string row_to_sql_fragment(TABLE *table, const uchar *buf,
+                                       const char *sep)
+{
+  my_ptrdiff_t diff= (my_ptrdiff_t)(buf - table->record[0]);
+  std::string out;
+
+  for (uint i= 0; i < table->s->fields; i++)
+  {
+    Field *field= table->field[i];
+    field->move_field_offset(diff);
+
+    if (!out.empty()) out += sep;
+    out += '"';
+    out += field->field_name.str;
+    out += '"';
+    out += '=';
+
+    if (field->is_null())
+    {
+      out += "NULL";
+    }
+    else
+    {
+      switch (field->type())
+      {
+        case MYSQL_TYPE_TINY:
+        case MYSQL_TYPE_SHORT:
+        case MYSQL_TYPE_LONG:
+        case MYSQL_TYPE_INT24:
+        {
+          char tmp[32];
+          snprintf(tmp, sizeof(tmp), "%d", (int32_t)field->val_int());
+          out += tmp;
+          break;
+        }
+        case MYSQL_TYPE_LONGLONG:
+        {
+          char tmp[32];
+          snprintf(tmp, sizeof(tmp), "%lld", (long long)field->val_int());
+          out += tmp;
+          break;
+        }
+        case MYSQL_TYPE_FLOAT:
+        case MYSQL_TYPE_DOUBLE:
+        {
+          char tmp[64];
+          snprintf(tmp, sizeof(tmp), "%.17g", field->val_real());
+          out += tmp;
+          break;
+        }
+        default:
+        {
+          String s;
+          field->val_str(&s, &s);
+          out += '\'';
+          for (uint j= 0; j < s.length(); j++)
+          {
+            if (s[j] == '\'') out += '\'';
+            out += s[j];
+          }
+          out += '\'';
           break;
         }
       }
     }
 
-    appender->EndRow();
-    if (one_shot) one_shot->Flush();  // only flush immediately for single rows
+    field->move_field_offset(-diff);
   }
-  catch (const std::exception &e)
+  return out;
+}
+
+int ha_duckdb::update_row(const uchar *old_data, const uchar *new_data)
+{
+  DBUG_ENTER("ha_duckdb::update_row");
+  if (!connection) DBUG_RETURN(HA_ERR_INTERNAL_ERROR);
+
+  std::string sql= "UPDATE " + duckdb_table_name +
+                   " SET "   + row_to_sql_fragment(table, new_data, ", ") +
+                   " WHERE " + row_to_sql_fragment(table, old_data, " AND ");
+
+  auto r= connection->Query(sql);
+  if (r->HasError())
   {
-    sql_print_error("DuckDB: write_row failed: %s", e.what());
+    sql_print_error("DuckDB: update_row failed: %s",
+                    r->GetErrorObject().Message().c_str());
     DBUG_RETURN(HA_ERR_INTERNAL_ERROR);
   }
   DBUG_RETURN(0);
 }
 
-int ha_duckdb::update_row(const uchar *, const uchar *)
-{
-  DBUG_ENTER("ha_duckdb::update_row");
-  DBUG_RETURN(HA_ERR_WRONG_COMMAND);
-}
-
-int ha_duckdb::delete_row(const uchar *)
+int ha_duckdb::delete_row(const uchar *buf)
 {
   DBUG_ENTER("ha_duckdb::delete_row");
-  DBUG_RETURN(HA_ERR_WRONG_COMMAND);
+  if (!connection) DBUG_RETURN(HA_ERR_INTERNAL_ERROR);
+
+  std::string sql= "DELETE FROM " + duckdb_table_name +
+                   " WHERE " + row_to_sql_fragment(table, buf, " AND ");
+
+  auto r= connection->Query(sql);
+  if (r->HasError())
+  {
+    sql_print_error("DuckDB: delete_row failed: %s",
+                    r->GetErrorObject().Message().c_str());
+    DBUG_RETURN(HA_ERR_INTERNAL_ERROR);
+  }
+  DBUG_RETURN(0);
 }
 
 // ---------------------------------------------------------------------------
@@ -741,6 +911,112 @@ void ha_duckdb::cond_pop()
 }
 
 // ---------------------------------------------------------------------------
+// Direct UPDATE / DELETE pushdown
+//
+// When HA_CAN_DIRECT_UPDATE_AND_DELETE is set, MariaDB:
+//   1. Calls cond_push() with the WHERE condition → stored in pushed_where
+//   2. Calls info_push(UPDATE_FIELDS, ...) + info_push(UPDATE_VALUES, ...)
+//   3. Calls direct_update_rows_init() / direct_delete_rows_init()
+//   4. Calls direct_update_rows() / direct_delete_rows() once to execute
+//
+// This pushes the entire UPDATE/DELETE as a single DuckDB statement,
+// avoiding the expensive row-at-a-time update_row()/delete_row() path.
+// ---------------------------------------------------------------------------
+
+int ha_duckdb::info_push(uint info_type, void *info)
+{
+  if (info_type == INFO_KIND_UPDATE_FIELDS)
+    update_fields= static_cast<List<Item> *>(info);
+  else if (info_type == INFO_KIND_UPDATE_VALUES)
+    update_values= static_cast<List<Item> *>(info);
+  return 0;
+}
+
+int ha_duckdb::direct_update_rows_init(List<Item> *)
+{
+  return (connection && update_fields && update_values) ? 0
+                                                        : HA_ERR_WRONG_COMMAND;
+}
+
+int ha_duckdb::direct_update_rows(ha_rows *update_rows, ha_rows *found_rows)
+{
+  DBUG_ENTER("ha_duckdb::direct_update_rows");
+  if (!connection || !update_fields || !update_values)
+    DBUG_RETURN(HA_ERR_INTERNAL_ERROR);
+
+  // Build SET clause by printing each field=value pair
+  std::string set_clause;
+  List_iterator<Item> fi(*update_fields);
+  List_iterator<Item> vi(*update_values);
+  Item *fld, *val;
+  while ((fld= fi++) && (val= vi++))
+  {
+    String fs, vs;
+    fld->print(&fs, QT_ORDINARY);
+    val->print(&vs, QT_ORDINARY);
+
+    // Convert backticks to double-quotes and apply rewrite pass on values
+    std::string col(fs.ptr(), fs.length());
+    std::string v(vs.ptr(), vs.length());
+    for (char &c : col) if (c == '`') c = '"';
+    for (char &c : v)   if (c == '`') c = '"';
+    v= rewrite_mariadb_sql(v);
+
+    // Strip any table qualifier from the column name
+    size_t dot= col.rfind('.');
+    if (dot != std::string::npos) col= col.substr(dot + 1);
+
+    if (!set_clause.empty()) set_clause += ", ";
+    set_clause += col + "=" + v;
+  }
+
+  std::string sql= "UPDATE " + duckdb_table_name + " SET " + set_clause;
+  if (!pushed_where.empty())
+    sql += " WHERE " + pushed_where;
+
+  auto r= connection->Query(sql);
+  if (r->HasError())
+  {
+    sql_print_error("DuckDB: direct_update_rows failed: %s",
+                    r->GetErrorObject().Message().c_str());
+    DBUG_RETURN(HA_ERR_INTERNAL_ERROR);
+  }
+
+  ha_rows affected= (ha_rows)r->GetValue<int64_t>(0, 0);
+  *update_rows= affected;
+  *found_rows=  affected;
+  update_fields= nullptr;
+  update_values= nullptr;
+  DBUG_RETURN(0);
+}
+
+int ha_duckdb::direct_delete_rows_init()
+{
+  return connection ? 0 : HA_ERR_WRONG_COMMAND;
+}
+
+int ha_duckdb::direct_delete_rows(ha_rows *delete_rows)
+{
+  DBUG_ENTER("ha_duckdb::direct_delete_rows");
+  if (!connection) DBUG_RETURN(HA_ERR_INTERNAL_ERROR);
+
+  std::string sql= "DELETE FROM " + duckdb_table_name;
+  if (!pushed_where.empty())
+    sql += " WHERE " + pushed_where;
+
+  auto r= connection->Query(sql);
+  if (r->HasError())
+  {
+    sql_print_error("DuckDB: direct_delete_rows failed: %s",
+                    r->GetErrorObject().Message().c_str());
+    DBUG_RETURN(HA_ERR_INTERNAL_ERROR);
+  }
+
+  *delete_rows= (ha_rows)r->GetValue<int64_t>(0, 0);
+  DBUG_RETURN(0);
+}
+
+// ---------------------------------------------------------------------------
 // In-place ALTER TABLE — index creation and deletion
 //
 // MariaDB routes CREATE INDEX / DROP INDEX through the inplace alter API.
@@ -754,17 +1030,24 @@ enum_alter_inplace_result
 ha_duckdb::check_if_supported_inplace_alter(TABLE *altered_table,
                                             Alter_inplace_info *ha_alter_info)
 {
-  // Accept operations that are exclusively index additions and/or drops.
-  // Reject anything else (column changes, renames, etc.) so MariaDB falls
-  // back to its copy-table ALTER path for those.
-  const ulonglong index_ops= ALTER_ADD_INDEX                    |
-                             ALTER_DROP_INDEX                   |
-                             ALTER_ADD_UNIQUE_INDEX             |
-                             ALTER_DROP_UNIQUE_INDEX            |
-                             ALTER_ADD_NON_UNIQUE_NON_PRIM_INDEX|
-                             ALTER_DROP_NON_UNIQUE_NON_PRIM_INDEX|
+  const ulonglong index_ops= ALTER_ADD_INDEX                      |
+                             ALTER_DROP_INDEX                     |
+                             ALTER_ADD_UNIQUE_INDEX               |
+                             ALTER_DROP_UNIQUE_INDEX              |
+                             ALTER_ADD_NON_UNIQUE_NON_PRIM_INDEX  |
+                             ALTER_DROP_NON_UNIQUE_NON_PRIM_INDEX |
                              ALTER_INDEX_ORDER;
-  if (ha_alter_info->handler_flags & ~index_ops)
+
+  const ulonglong col_ops=   ALTER_ADD_STORED_BASE_COLUMN        |
+                             ALTER_DROP_STORED_COLUMN            |
+                             ALTER_RENAME_COLUMN                 |
+                             ALTER_CHANGE_COLUMN_DEFAULT         |
+                             ALTER_COLUMN_ORDER                  |
+                             ALTER_COLUMN_NAME                   |
+                             ALTER_COLUMN_NULLABLE               |
+                             ALTER_COLUMN_NOT_NULLABLE;
+
+  if (ha_alter_info->handler_flags & ~(index_ops | col_ops))
     return HA_ALTER_INPLACE_NOT_SUPPORTED;
 
   return HA_ALTER_INPLACE_NO_LOCK;
@@ -774,6 +1057,105 @@ bool ha_duckdb::inplace_alter_table(TABLE *altered_table,
                                     Alter_inplace_info *ha_alter_info)
 {
   if (!connection) return true;
+
+  const ulonglong flags= ha_alter_info->handler_flags;
+
+  // --- ADD COLUMN ---
+  if (flags & ALTER_ADD_STORED_BASE_COLUMN)
+  {
+    // Find fields present in altered_table but not in original table
+    for (uint i= 0; i < altered_table->s->fields; i++)
+    {
+      Field *new_f= altered_table->field[i];
+      bool exists= false;
+      for (uint j= 0; j < table->s->fields; j++)
+      {
+        if (strcasecmp(new_f->field_name.str,
+                       table->field[j]->field_name.str) == 0)
+        { exists= true; break; }
+      }
+      if (exists) continue;
+
+      std::string sql= "ALTER TABLE " + duckdb_table_name +
+                       " ADD COLUMN \"" + new_f->field_name.str +
+                       "\" " + field_type_to_duckdb(new_f);
+      auto r= connection->Query(sql);
+      if (r->HasError())
+      {
+        sql_print_error("DuckDB: ADD COLUMN %s failed: %s",
+                        new_f->field_name.str,
+                        r->GetErrorObject().Message().c_str());
+        return true;
+      }
+      sql_print_information("DuckDB: added column %s to %s",
+                            new_f->field_name.str, duckdb_table_name.c_str());
+    }
+  }
+
+  // --- DROP COLUMN ---
+  if (flags & ALTER_DROP_STORED_COLUMN)
+  {
+    // Find fields present in original table but not in altered_table
+    for (uint i= 0; i < table->s->fields; i++)
+    {
+      Field *old_f= table->field[i];
+      bool exists= false;
+      for (uint j= 0; j < altered_table->s->fields; j++)
+      {
+        if (strcasecmp(old_f->field_name.str,
+                       altered_table->field[j]->field_name.str) == 0)
+        { exists= true; break; }
+      }
+      if (exists) continue;
+
+      std::string sql= "ALTER TABLE " + duckdb_table_name +
+                       " DROP COLUMN \"" + old_f->field_name.str + "\"";
+      auto r= connection->Query(sql);
+      if (r->HasError())
+      {
+        sql_print_error("DuckDB: DROP COLUMN %s failed: %s",
+                        old_f->field_name.str,
+                        r->GetErrorObject().Message().c_str());
+        return true;
+      }
+      sql_print_information("DuckDB: dropped column %s from %s",
+                            old_f->field_name.str, duckdb_table_name.c_str());
+    }
+  }
+
+  // --- RENAME COLUMN ---
+  if (flags & (ALTER_RENAME_COLUMN | ALTER_COLUMN_NAME))
+  {
+    // Walk columns that exist in both old and new tables (by position).
+    // Handle rename first, then type change (DuckDB requires separate ALTER).
+    uint n= MY_MIN(table->s->fields, altered_table->s->fields);
+    for (uint i= 0; i < n; i++)
+    {
+      Field *old_f= table->field[i];
+      Field *new_f= altered_table->field[i];
+      const char *old_name= old_f->field_name.str;
+      const char *new_name= new_f->field_name.str;
+
+      // Rename if names differ
+      if (strcasecmp(old_name, new_name) != 0)
+      {
+        std::string sql= "ALTER TABLE " + duckdb_table_name +
+                         " RENAME COLUMN \"" + old_name +
+                         "\" TO \"" + new_name + "\"";
+        auto r= connection->Query(sql);
+        if (r->HasError())
+        {
+          sql_print_error("DuckDB: RENAME COLUMN %s→%s failed: %s",
+                          old_name, new_name,
+                          r->GetErrorObject().Message().c_str());
+          return true;
+        }
+        sql_print_information("DuckDB: renamed column %s → %s in %s",
+                              old_name, new_name, duckdb_table_name.c_str());
+      }
+
+    }
+  }
 
   // Add indexes
   for (uint i= 0; i < ha_alter_info->index_add_count; i++)
