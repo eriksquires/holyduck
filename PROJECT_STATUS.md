@@ -2,12 +2,22 @@
 
 ## What Works (as of 2026-03-22)
 
-### Core SQL Operations
+### DDL
 - `CREATE TABLE ... ENGINE=DUCKDB` — creates a shared `#duckdb/global.duckdb` file per database
-- `INSERT INTO` — rows written via DuckDB Appender API (bulk-insert path)
-- `SELECT` — full table scan via DuckDB MaterializedQueryResult
 - `DROP TABLE` — removes table from DuckDB
 - `RENAME TABLE` — renames table in DuckDB
+- `TRUNCATE TABLE` — pushed as DuckDB native TRUNCATE
+- `ALTER TABLE ADD COLUMN` — pushed to DuckDB inplace
+- `ALTER TABLE DROP COLUMN` — pushed to DuckDB inplace
+- `ALTER TABLE RENAME COLUMN` / `CHANGE col` — pushed to DuckDB inplace
+- `CREATE INDEX` / `DROP INDEX` — pushed to DuckDB inplace via inplace ALTER API
+
+### DML
+- `INSERT INTO` (single-row) — SQL path, enforces PK/UNIQUE constraints, returns 1022 on duplicate
+- `INSERT INTO` (multi-row bulk) — DuckDB Appender path, enforces constraints, rejects entire batch on duplicate
+- `REPLACE INTO` — uses DuckDB `INSERT OR REPLACE INTO`, handles conflict atomically
+- `UPDATE ... WHERE` — direct pushdown: `UPDATE table SET ... WHERE pushed_where`
+- `DELETE ... WHERE` — direct pushdown: `DELETE FROM table WHERE pushed_where`
 
 ### Query Pushdown
 - **Full SELECT pushdown** via `ha_duckdb_select_handler`: GROUP BY, SUM, COUNT, AVG,
@@ -18,6 +28,12 @@
   Verified: 1-month date filter returns 12,488 rows instead of 300,000.
 - **Column subset scan**: `rnd_init()` reads `table->read_set` and emits `SELECT col1, col2`
   instead of `SELECT *`, reducing data transfer for cross-engine joins.
+
+### Concurrency
+- Write locks upgraded to `TL_WRITE` in `store_lock()` — MariaDB serializes concurrent writers
+  at the table level (DuckDB only supports one writer at a time).
+- Concurrent readers work via DuckDB's MVCC — readers never blocked by other readers.
+- Readers briefly blocked during active writes (acceptable; writes are infrequent).
 
 ### MariaDB Function Compatibility
 Macros installed into DuckDB at startup translate MariaDB function names:
@@ -62,29 +78,34 @@ Condition pushdown reduces the rows DuckDB returns before the join.
                                   read_set   → SELECT only needed columns
        │
        ▼
-[DuckDB embedded engine]  ← libduckdb.so v1.0.0
+[DuckDB embedded engine]  ← libduckdb.so v1.5.0
        │
        ▼
 [#duckdb/global.duckdb]  ← one file per MariaDB database, on-disk columnar storage
 ```
 
 ### Intentional Design: No MariaDB Index Scans
-`max_supported_keys()` returns 0.  MariaDB does not know about DuckDB indexes and cannot
-plan `type=ref` joins against them.  This is deliberate:
-- Exposing index capability would allow the optimizer to drive row-at-a-time index scans
-  through the handler API, bypassing DuckDB's vectorised execution entirely.
+`index_flags()` returns no read-capability bits. MariaDB cannot plan row-at-a-time
+index scans against DuckDB tables. This is deliberate:
+- Exposing index capability would allow the optimizer to drive index scans through the
+  handler API, bypassing DuckDB's vectorised execution entirely.
 - DuckDB's own planner uses indexes internally on pushed-down queries.
 - Cross-engine joins use `type=ALL` + a single batched `rnd_init()` call, which is correct.
+- `max_supported_keys()` returns 64 so MariaDB accepts index DDL; it just never uses them.
+
+### Intentional Design: No Column Type Changes
+`ALTER TABLE MODIFY COLUMN` (type changes) are not supported via inplace ALTER.
+The safe pattern is: add new column → populate it → drop old column → rename new column.
 
 ## Known Limitations
 
 | Area | Status |
 |---|---|
-| UPDATE / DELETE | Return `HA_ERR_WRONG_COMMAND` — append-only for now |
-| Index creation | Not yet implemented — `CREATE TABLE ... INDEX(col)` silently ignored |
-| Row estimates | `stats.records` always 0; EXPLAIN shows `rows=300000` even with pushdown |
-| NULL handling | Implemented but not exhaustively tested |
-| Persistence across restart | Works via `CREATE TABLE IF NOT EXISTS` in `create()` |
+| Column type changes | Not supported — use add/populate/rename/drop pattern |
+| `INSERT ... ON DUPLICATE KEY UPDATE` | Not supported |
+| `ALTER TABLE ADD/DROP COLUMN` across databases | Not tested |
+| Aggregation pushdown | Aggregations still run in MariaDB; only row/column filtering is pushed for cross-engine queries |
+| Bulk INSERT constraint errors | Returns error 1030 instead of 1022 (ugly but correct — batch rejected) |
 
 ## File Layout
 
@@ -97,10 +118,10 @@ mariadb-duckdb-plugin/
 ├── sql/
 │   └── duckdb_mariadb_compat.sql  # MariaDB→DuckDB function macros (deployment artifact)
 ├── lib/
-│   ├── libduckdb.so         # DuckDB v1.0.0
+│   ├── libduckdb.so         # DuckDB v1.5.0
 │   ├── duckdb.h / duckdb.hpp
 ├── build/                   # cmake output — gitignored
-│   └── libha_duckdb.so
+│   └── ha_duckdb.so
 ├── data/                    # MariaDB data dir (bind-mounted into container) — gitignored
 ├── docker/
 │   └── base-ubuntu.dockerfile
