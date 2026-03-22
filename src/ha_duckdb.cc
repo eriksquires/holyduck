@@ -1064,7 +1064,16 @@ static std::string rewrite_mariadb_sql(const std::string &sql)
   // Cannot use a macro because DuckDB strptime() requires a constant
   // format string (compile-time constraint), which a macro parameter
   // cannot satisfy.
+  // str_to_date(str, fmt) → strptime(str, fmt)
+  // strptime() requires a constant format — can't use a macro parameter.
   s= rewrite_func_name(s, "str_to_date", "strptime");
+
+  // char(n) → chr(n)
+  // 'char' is a reserved type keyword in DuckDB; a macro named 'char'
+  // fails to install.  Single-arg rename only — multi-arg CHAR() which
+  // concatenates code points is rare and not handled.
+  s= rewrite_func_name(s, "char", "chr");
+
   return s;
 }
 

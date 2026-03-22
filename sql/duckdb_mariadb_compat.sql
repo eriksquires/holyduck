@@ -46,6 +46,39 @@ CREATE OR REPLACE MACRO last_day(d) AS
     (date_trunc('month', d::DATE) + INTERVAL 1 MONTH - INTERVAL 1 DAY)::DATE;
 
 -- ---------------------------------------------------------------------------
+-- String functions
+-- ---------------------------------------------------------------------------
+
+-- MariaDB: LOCATE(needle, haystack)  →  position of needle in haystack
+-- DuckDB instr() has the same semantics but reversed argument order.
+-- Note: the 3-arg form LOCATE(needle, haystack, start_pos) is not handled
+-- here because DuckDB v1.0 has no macro arity overloading — a 3-arg macro
+-- would shadow this 2-arg one.
+CREATE OR REPLACE MACRO locate(needle, haystack) AS instr(haystack, needle);
+
+-- MariaDB: MID(str, pos, len)  →  alias for SUBSTRING(str, pos, len)
+CREATE OR REPLACE MACRO mid(s, pos, len) AS substring(s, pos, len);
+
+-- MariaDB: SPACE(n)  →  string of n space characters
+CREATE OR REPLACE MACRO space(n) AS repeat(' ', n);
+
+-- MariaDB: STRCMP(a, b)  →  -1 / 0 / 1
+CREATE OR REPLACE MACRO strcmp(a, b) AS
+    CASE WHEN a < b THEN -1 WHEN a > b THEN 1 ELSE 0 END;
+
+-- MariaDB: REGEXP_SUBSTR(str, pattern)  →  first match of pattern in str
+CREATE OR REPLACE MACRO regexp_substr(s, pat) AS regexp_extract(s, pat);
+
+-- MariaDB: FIND_IN_SET(needle, csv_list)  →  1-based position in comma-separated list
+-- Returns 0 if not found (matching MariaDB behaviour).
+CREATE OR REPLACE MACRO find_in_set(needle, lst) AS
+    COALESCE(list_position(string_split(lst, ','), needle), 0);
+
+-- MariaDB: CHAR(n)  →  chr(n)
+-- 'char' is a reserved type keyword in DuckDB so a macro cannot be used.
+-- Handled by the rewrite pass in ha_duckdb.cc instead.
+
+-- ---------------------------------------------------------------------------
 -- Control flow
 -- ---------------------------------------------------------------------------
 
