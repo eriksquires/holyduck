@@ -18,6 +18,9 @@
 // MariaDB global — absolute path to the data directory (trailing slash)
 extern char mysql_real_data_home[];
 
+// Forward declare sysvar so registry_get() can reference it
+static ulong duckdb_max_threads;
+
 // ---------------------------------------------------------------------------
 // Global DuckDB instance registry
 //
@@ -45,7 +48,14 @@ static duckdb::DuckDB *registry_get(const std::string &path)
     return it->second.db;
   }
   duckdb::DuckDB *db= nullptr;
-  try { db= new duckdb::DuckDB(path.c_str()); }
+  try
+  {
+    duckdb::DBConfig config;
+    // 0 means "not set" — let DuckDB use all available cores by default
+    if (duckdb_max_threads > 0)
+      config.options.maximum_threads= duckdb_max_threads;
+    db= new duckdb::DuckDB(path.c_str(), &config);
+  }
   catch (const std::exception &e)
   {
     mysql_mutex_unlock(&g_duckdb_mutex);
@@ -127,6 +137,27 @@ static int ensure_duckdb_dir()
 static handlerton *duckdb_hton;
 
 static const char *ha_duckdb_exts[] = { NullS };
+
+// ---------------------------------------------------------------------------
+// System variables
+// ---------------------------------------------------------------------------
+
+static MYSQL_SYSVAR_ULONG(
+  max_threads,
+  duckdb_max_threads,
+  PLUGIN_VAR_RQCMDARG,
+  "Maximum number of CPU threads DuckDB may use (0 = all available cores)",
+  NULL, NULL,
+  0,    /* default */
+  0,    /* min */
+  1024, /* max */
+  0);
+
+static struct st_mysql_sys_var *duckdb_system_variables[]=
+{
+  MYSQL_SYSVAR(max_threads),
+  NULL
+};
 
 #ifdef HAVE_PSI_INTERFACE
 static PSI_mutex_key dk_key_mutex_DuckDB_share_mutex;
@@ -828,7 +859,7 @@ maria_declare_plugin(duckdb)
   duckdb_done_func,
   0x0100,
   NULL,
-  NULL,
+  duckdb_system_variables,
   "1.0",
   MariaDB_PLUGIN_MATURITY_STABLE,
 }
