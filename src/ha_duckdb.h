@@ -120,6 +120,15 @@ public:
   const COND *cond_push(const COND *cond) override;
   void        cond_pop()                  override;
 
+  enum_alter_inplace_result
+  check_if_supported_inplace_alter(TABLE *altered_table,
+                                   Alter_inplace_info *ha_alter_info) override;
+  bool inplace_alter_table(TABLE *altered_table,
+                           Alter_inplace_info *ha_alter_info) override;
+  bool commit_inplace_alter_table(TABLE *altered_table,
+                                  Alter_inplace_info *ha_alter_info,
+                                  bool commit) override;
+
   ulonglong table_flags() const
   {
     return (HA_REC_NOT_IN_SEQ | HA_NO_BLOBS | HA_BINLOG_STMT_CAPABLE |
@@ -153,9 +162,9 @@ public:
   // DuckDB indexes are still created internally (see create()) and used by
   // DuckDB's own query planner on pushed-down queries.  MariaDB simply never
   // learns they exist, so it cannot misuse them.
-  uint max_supported_keys()          const { return 0; }
-  uint max_supported_key_parts()     const { return 0; }
-  uint max_supported_key_length()    const { return 0; }
+  uint max_supported_keys()          const { return 64; }
+  uint max_supported_key_parts()     const { return 16; }
+  uint max_supported_key_length()    const { return 3072; }
 
   IO_AND_CPU_COST scan_time()
   {

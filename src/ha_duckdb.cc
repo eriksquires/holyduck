@@ -741,6 +741,102 @@ void ha_duckdb::cond_pop()
 }
 
 // ---------------------------------------------------------------------------
+// In-place ALTER TABLE — index creation and deletion
+//
+// MariaDB routes CREATE INDEX / DROP INDEX through the inplace alter API.
+// We accept only pure index add/drop operations and push them straight to
+// DuckDB.  MariaDB's query planner never uses these indexes (index_flags()
+// returns no read-capability bits), but DuckDB's own planner uses them
+// on pushed-down queries.
+// ---------------------------------------------------------------------------
+
+enum_alter_inplace_result
+ha_duckdb::check_if_supported_inplace_alter(TABLE *altered_table,
+                                            Alter_inplace_info *ha_alter_info)
+{
+  // Accept operations that are exclusively index additions and/or drops.
+  // Reject anything else (column changes, renames, etc.) so MariaDB falls
+  // back to its copy-table ALTER path for those.
+  const ulonglong index_ops= ALTER_ADD_INDEX                    |
+                             ALTER_DROP_INDEX                   |
+                             ALTER_ADD_UNIQUE_INDEX             |
+                             ALTER_DROP_UNIQUE_INDEX            |
+                             ALTER_ADD_NON_UNIQUE_NON_PRIM_INDEX|
+                             ALTER_DROP_NON_UNIQUE_NON_PRIM_INDEX|
+                             ALTER_INDEX_ORDER;
+  if (ha_alter_info->handler_flags & ~index_ops)
+    return HA_ALTER_INPLACE_NOT_SUPPORTED;
+
+  return HA_ALTER_INPLACE_NO_LOCK;
+}
+
+bool ha_duckdb::inplace_alter_table(TABLE *altered_table,
+                                    Alter_inplace_info *ha_alter_info)
+{
+  if (!connection) return true;
+
+  // Add indexes
+  for (uint i= 0; i < ha_alter_info->index_add_count; i++)
+  {
+    KEY *key= &ha_alter_info->key_info_buffer[ha_alter_info->index_add_buffer[i]];
+    bool is_unique= (key->flags & HA_NOSAME);
+
+    std::ostringstream sql;
+    sql << (is_unique ? "CREATE UNIQUE INDEX " : "CREATE INDEX ");
+    sql << "\"idx_" << table->s->table_name.str << "_" << key->name.str << "\"";
+    sql << " ON " << duckdb_table_name << " (";
+    for (uint j= 0; j < key->user_defined_key_parts; j++)
+    {
+      if (j > 0) sql << ", ";
+      Field *f= altered_table->field[key->key_part[j].fieldnr];
+      sql << '"' << f->field_name.str << '"';
+    }
+    sql << ")";
+
+    auto r= connection->Query(sql.str());
+    if (r->HasError())
+    {
+      sql_print_error("DuckDB: CREATE INDEX failed for %s: %s",
+                      key->name.str, r->GetError().c_str());
+      return true;
+    }
+    sql_print_information("DuckDB: created index %s on %s",
+                          key->name.str, duckdb_table_name.c_str());
+  }
+
+  // Drop indexes
+  for (uint i= 0; i < ha_alter_info->index_drop_count; i++)
+  {
+    KEY *key= ha_alter_info->index_drop_buffer[i];
+    std::string idx_name= "\"idx_" + std::string(table->s->table_name.str) +
+                          "_" + key->name.str + "\"";
+    std::string sql= "DROP INDEX IF EXISTS " + idx_name;
+
+    auto r= connection->Query(sql);
+    if (r->HasError())
+    {
+      sql_print_error("DuckDB: DROP INDEX failed for %s: %s",
+                      key->name.str, r->GetError().c_str());
+      return true;
+    }
+    sql_print_information("DuckDB: dropped index %s on %s",
+                          key->name.str, duckdb_table_name.c_str());
+  }
+
+  return false;
+}
+
+bool ha_duckdb::commit_inplace_alter_table(TABLE *altered_table,
+                                           Alter_inplace_info *ha_alter_info,
+                                           bool commit)
+{
+  // Index operations are executed immediately in inplace_alter_table().
+  // Nothing to commit or roll back here.
+  ha_alter_info->group_commit_ctx= NULL;
+  return false;
+}
+
+// ---------------------------------------------------------------------------
 // Full-table scan
 // ---------------------------------------------------------------------------
 
