@@ -25,7 +25,7 @@ add_definitions(
   -DHAVE_CONFIG_H
   -DMYSQL_DYNAMIC_PLUGIN
   -D_FILE_OFFSET_BITS=64
-  -D_GLIBCXX_USE_CXX11_ABI=0   # Match libduckdb.so which uses old ABI
+  -D_GLIBCXX_USE_CXX11_ABI=1   # Match libduckdb.so v1.5.0 which uses new CXX11 ABI
 )
 
 include_directories(

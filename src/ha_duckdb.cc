@@ -98,7 +98,7 @@ static void run_macro_statements(duckdb::Connection &conn,
     auto r= conn.Query(sql);
     if (r->HasError())
       sql_print_warning("DuckDB: compat macro failed (%s): %s — %s",
-                        source, sql.c_str(), r->GetError().c_str());
+                        source, sql.c_str(), r->GetErrorObject().Message().c_str());
   }
 }
 
@@ -138,7 +138,7 @@ static void install_mariadb_compat_macros(duckdb::DuckDB *db)
     auto r= conn.Query(sql);
     if (r->HasError())
       sql_print_warning("DuckDB: failed to install built-in compat macro: %s — %s",
-                        sql, r->GetError().c_str());
+                        sql, r->GetErrorObject().Message().c_str());
   }
 }
 
@@ -480,7 +480,7 @@ int ha_duckdb::create(const char *name, TABLE *table_arg,
     {
       registry_release(p.db_file);
       sql_print_error("DuckDB: schema creation failed: %s",
-                      r->GetError().c_str());
+                      r->GetErrorObject().Message().c_str());
       DBUG_RETURN(1);
     }
 
@@ -489,7 +489,7 @@ int ha_duckdb::create(const char *name, TABLE *table_arg,
     {
       registry_release(p.db_file);
       sql_print_error("DuckDB: table creation failed: %s",
-                      r->GetError().c_str());
+                      r->GetErrorObject().Message().c_str());
       DBUG_RETURN(1);
     }
 
@@ -511,7 +511,7 @@ int ha_duckdb::create(const char *name, TABLE *table_arg,
       auto ri= conn.Query(idx.str());
       if (ri->HasError())
         sql_print_warning("DuckDB: index creation failed for %s: %s",
-                          key->name.str, ri->GetError().c_str());
+                          key->name.str, ri->GetErrorObject().Message().c_str());
     }
 
     registry_release(p.db_file);
@@ -797,7 +797,7 @@ bool ha_duckdb::inplace_alter_table(TABLE *altered_table,
     if (r->HasError())
     {
       sql_print_error("DuckDB: CREATE INDEX failed for %s: %s",
-                      key->name.str, r->GetError().c_str());
+                      key->name.str, r->GetErrorObject().Message().c_str());
       return true;
     }
     sql_print_information("DuckDB: created index %s on %s",
@@ -816,7 +816,7 @@ bool ha_duckdb::inplace_alter_table(TABLE *altered_table,
     if (r->HasError())
     {
       sql_print_error("DuckDB: DROP INDEX failed for %s: %s",
-                      key->name.str, r->GetError().c_str());
+                      key->name.str, r->GetErrorObject().Message().c_str());
       return true;
     }
     sql_print_information("DuckDB: dropped index %s on %s",
@@ -872,7 +872,7 @@ int ha_duckdb::rnd_init(bool scan)
     auto r= connection->Query(sql);
     if (r->HasError())
     {
-      sql_print_error("DuckDB: rnd_init failed: %s", r->GetError().c_str());
+      sql_print_error("DuckDB: rnd_init failed: %s", r->GetErrorObject().Message().c_str());
       DBUG_RETURN(HA_ERR_INTERNAL_ERROR);
     }
     scan_result= r.release();
@@ -1163,7 +1163,7 @@ int ha_duckdb::analyze(THD *, HA_CHECK_OPT *)
     if (r->HasError())
     {
       sql_print_error("DuckDB: ANALYZE failed for %s: %s",
-                      duckdb_table_name.c_str(), r->GetError().c_str());
+                      duckdb_table_name.c_str(), r->GetErrorObject().Message().c_str());
       DBUG_RETURN(HA_ADMIN_FAILED);
     }
   }
@@ -1425,7 +1425,7 @@ int ha_duckdb_select_handler::init_scan()
     if (r->HasError())
     {
       sql_print_error("DuckDB pushdown: query failed: %s\nSQL: %s",
-                      r->GetError().c_str(), sql.c_str());
+                      r->GetErrorObject().Message().c_str(), sql.c_str());
       return 1;
     }
     result= r.release();
