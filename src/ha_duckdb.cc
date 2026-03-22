@@ -669,6 +669,30 @@ ha_rows ha_duckdb::records_in_range(uint, const key_range *, const key_range *,
   DBUG_RETURN(stats.records ? stats.records : 10);
 }
 
+int ha_duckdb::analyze(THD *, HA_CHECK_OPT *)
+{
+  DBUG_ENTER("ha_duckdb::analyze");
+  if (!connection) DBUG_RETURN(HA_ADMIN_FAILED);
+  try
+  {
+    // Propagate ANALYZE to DuckDB so it refreshes its internal statistics
+    // for query planning on pushed-down queries (and future indexes)
+    auto r= connection->Query("ANALYZE " + duckdb_table_name);
+    if (r->HasError())
+    {
+      sql_print_error("DuckDB: ANALYZE failed for %s: %s",
+                      duckdb_table_name.c_str(), r->GetError().c_str());
+      DBUG_RETURN(HA_ADMIN_FAILED);
+    }
+  }
+  catch (const std::exception &e)
+  {
+    sql_print_error("DuckDB: ANALYZE exception: %s", e.what());
+    DBUG_RETURN(HA_ADMIN_FAILED);
+  }
+  DBUG_RETURN(HA_ADMIN_OK);
+}
+
 // ---------------------------------------------------------------------------
 // Select handler — full query pushdown
 // ---------------------------------------------------------------------------

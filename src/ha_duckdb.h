@@ -105,6 +105,7 @@ public:
                              enum thr_lock_type lock_type);
 
   int info(uint flag);
+  int analyze(THD *thd, HA_CHECK_OPT *check_opt);
   ha_rows records_in_range(uint inx, const key_range *min_key,
                            const key_range *max_key, page_range *res);
 
