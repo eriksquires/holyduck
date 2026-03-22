@@ -36,6 +36,30 @@ JOIN agg a ON s.id = a.sensor_id;
 
 EXPLAIN confirms the CTE runs entirely inside DuckDB (`PUSHED DERIVED`), returning a small result for MariaDB to join.
 
+## HolyDuck vs ColumnStore
+
+MariaDB's ColumnStore is the official MariaDB analytical storage engine in this space. Here's how our humble contribution compares:
+
+|                           | HolyDuck                          | ColumnStore                          |
+| ------------------------- | --------------------------------- | ------------------------------------ |
+| Concurrent writers        | Single writer (DuckDB limitation) | Parallel ingestion                   |
+| High availability         | None — local file only            | MariaDB replication + clustering     |
+| Multi-server              | Single node                       | Distributed across nodes             |
+| Deployment                | Drop in a `.so` file              | Full cluster infrastructure          |
+| Query speed (single node) | DuckDB — extremely fast           | Fast, but more overhead              |
+| Setup complexity          | Minutes                           | Hours to days                        |
+| ETL tooling               | Standard SQL                      | Bulk loaders, S3, enterprise tooling |
+
+**HolyDuck's sweet spot:** single-node analytics alongside InnoDB. Big overnight ETL jobs, exploratory data analysis during the day, million-to-billion row scans that return small aggregated results — all without standing up any infrastructure.
+
+One big benefit, if you can live with single writers, is you now have a sharable database with a single source of truth.  Also, if you are like me and leave db connections stranded in various places while doing R/Quarto development you'll find yourself spending much less time managing connections in your code. 
+
+**ColumnStore's sweet spot:** when you've outgrown a single node and need HA, replication, and multi-server distribution.
+
+If your workload fits on one machine, HolyDuck will likely be faster and infinitely simpler to run.
+
+
+
 ## Build Requirements
 
 - Linux x86-64
@@ -161,26 +185,6 @@ Edit the file and redeploy without recompiling.
 | Cross-engine aggregation | Wrap in a CTE to push aggregation into DuckDB (`PUSHED DERIVED`) |
 
 See [TECHNICAL.md](TECHNICAL.md) for full details on architecture and internals.
-
-## HolyDuck vs ColumnStore
-
-MariaDB's ColumnStore is the other analytical storage engine in this space. Here's how they compare:
-
-| | HolyDuck | ColumnStore |
-|---|---|---|
-| Concurrent writers | Single writer (DuckDB limitation) | Parallel ingestion |
-| High availability | None — local file only | MariaDB replication + clustering |
-| Multi-server | Single node | Distributed across nodes |
-| Deployment | Drop in a `.so` file | Full cluster infrastructure |
-| Query speed (single node) | DuckDB — extremely fast | Fast, but more overhead |
-| Setup complexity | Minutes | Hours to days |
-| ETL tooling | Standard SQL | Bulk loaders, S3, enterprise tooling |
-
-**HolyDuck's sweet spot:** single-node analytics alongside InnoDB. Big overnight ETL jobs, exploratory data analysis during the day, million-to-billion row scans that return small aggregated results — all without standing up any infrastructure.
-
-**ColumnStore's sweet spot:** when you've outgrown a single node and need HA, replication, and multi-server distribution.
-
-If your workload fits on one machine, HolyDuck will likely be faster and infinitely simpler to run.
 
 ## License
 
