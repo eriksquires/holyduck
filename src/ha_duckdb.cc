@@ -1119,16 +1119,40 @@ static std::string strip_db_qualifier(const std::string &sql)
 static std::string rewrite_mariadb_sql(const std::string &sql)
 {
   std::string s= sql;
-  // str_to_date(str, fmt) → strptime(str, fmt)
-  // Same argument order; DuckDB just uses a different name.
-  // Cannot use a macro because DuckDB strptime() requires a constant
-  // format string (compile-time constraint), which a macro parameter
-  // cannot satisfy.
-  // str_to_date(str, fmt) → strptime(str, fmt)
-  // strptime() requires a constant format — can't use a macro parameter.
+
   s= strip_db_qualifier(s);
 
+  // Strip MariaDB's <cache>(...) wrapper around constant expressions.
+  // MariaDB's AST printer emits e.g. <cache>('2022-01-01') for literals
+  // that have been evaluated and cached.  DuckDB's parser rejects this
+  // syntax — replace <cache>(expr) with just expr.
+  {
+    std::string out;
+    out.reserve(s.size());
+    size_t i= 0, n= s.size();
+    const std::string tag= "<cache>(";
+    while (i < n)
+    {
+      if (s.compare(i, tag.size(), tag) == 0)
+      {
+        i += tag.size();
+        int depth= 1;
+        while (i < n && depth > 0)
+        {
+          if      (s[i] == '(') depth++;
+          else if (s[i] == ')') depth--;
+          if (depth > 0) out += s[i];
+          i++;
+        }
+      }
+      else
+        out += s[i++];
+    }
+    s= out;
+  }
+
   // str_to_date(str, fmt) → strptime(str, fmt)
+  // strptime() requires a constant format — can't use a macro parameter.
   s= rewrite_func_name(s, "str_to_date", "strptime");
 
   // char(n) → chr(n)
