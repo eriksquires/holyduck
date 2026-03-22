@@ -1116,8 +1116,10 @@ ha_rows ha_duckdb::records_in_range(uint inx, const key_range *min_key,
         conditions= max_cond;
     }
 
-    // Ask DuckDB's query planner for its row estimate via EXPLAIN
-    std::string sql= "EXPLAIN SELECT * FROM " + duckdb_table_name;
+    // Ask DuckDB's query planner for its row estimate via EXPLAIN FORMAT JSON.
+    // The JSON plan contains "Estimated Cardinality": "NNN" at every node;
+    // the first occurrence (top-level PROJECTION) is the total row estimate.
+    std::string sql= "EXPLAIN (FORMAT JSON) SELECT * FROM " + duckdb_table_name;
     if (!conditions.empty())
       sql += " WHERE " + conditions;
 
@@ -1125,16 +1127,14 @@ ha_rows ha_duckdb::records_in_range(uint inx, const key_range *min_key,
     if (r->HasError() || r->RowCount() == 0)
       DBUG_RETURN(stats.records ? stats.records : 10);
 
-    // Parse estimated cardinality from explain_value (column 1)
-    // DuckDB v1.0 renders it as "EC: NNN" in the text plan
+    // Column 1 (explain_value) contains the JSON text
     std::string plan= r->GetValue(1, 0).ToString();
-    const std::string ec_tag= "EC: ";
-    size_t pos= plan.find(ec_tag);
+    const std::string tag= "\"Estimated Cardinality\": \"";
+    size_t pos= plan.find(tag);
     if (pos == std::string::npos)
       DBUG_RETURN(stats.records ? stats.records : 10);
 
-    pos += ec_tag.length();
-    // Read digits until non-digit
+    pos += tag.size();
     std::string num;
     while (pos < plan.size() && isdigit((unsigned char)plan[pos]))
       num += plan[pos++];
