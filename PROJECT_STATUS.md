@@ -23,11 +23,11 @@
 - **Full SELECT pushdown** via `ha_duckdb_select_handler`: GROUP BY, SUM, COUNT, AVG,
   ORDER BY executed entirely inside DuckDB when all tables in the query are DUCKDB engine.
   EXPLAIN shows `PUSHED SELECT` with all-NULL access details.
-- **Condition pushdown** via `cond_push()`: WHERE conditions on cross-engine joins are pushed
+- **Condition pushdown** via `cond_push()`: For cross-engine joins, WHERE conditions are pushed
   into the DuckDB scan query.  EXPLAIN shows `Using where with pushed condition`.
   Verified: 1-month date filter returns 12,488 rows instead of 300,000.
-- **Column subset scan**: `rnd_init()` reads `table->read_set` and emits `SELECT col1, col2`
-  instead of `SELECT *`, reducing data transfer for cross-engine joins.
+- **Column subset scan**: For cross-engine joins, `rnd_init()` reads `table->read_set` and emits
+  `SELECT col1, col2` instead of `SELECT *`, reducing data transfer.
 
 ### Concurrency
 - Write locks upgraded to `TL_WRITE` in `store_lock()` — MariaDB serializes concurrent writers
@@ -103,7 +103,7 @@ The safe pattern is: add new column → populate it → drop old column → rena
 |---|---|
 | Column type changes | Not supported — use add/populate/rename/drop pattern |
 | `INSERT ... ON DUPLICATE KEY UPDATE` | Not supported |
-| Aggregation pushdown | Aggregations still run in MariaDB; only row/column filtering is pushed for cross-engine queries |
+| Aggregation pushdown | For cross-engine queries, aggregations still run in MariaDB; only row/column filtering is pushed |
 | Bulk INSERT constraint errors | Returns error 1030 instead of 1022 (ugly but correct — batch rejected) |
 
 ## File Layout
