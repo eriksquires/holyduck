@@ -953,6 +953,87 @@ int ha_duckdb::analyze(THD *, HA_CHECK_OPT *)
 }
 
 // ---------------------------------------------------------------------------
+// SQL rewrite pass — applied to every pushed-down query before DuckDB
+// sees it.  Handles cases where a simple macro cannot work (e.g. DuckDB
+// functions that require constant arguments can't be parameterised via
+// a macro, so we inline the literal directly by renaming the call here).
+// ---------------------------------------------------------------------------
+
+// Replace every occurrence of the SQL function named `from_func` with
+// `to_func`, skipping content inside single-quoted string literals.
+// Matches whole function names only (must be preceded by a non-identifier
+// character and followed by optional whitespace then '(').
+static std::string rewrite_func_name(const std::string &sql,
+                                     const char *from_func,
+                                     const char *to_func)
+{
+  std::string out;
+  out.reserve(sql.size());
+  size_t i= 0, n= sql.size(), flen= strlen(from_func);
+
+  while (i < n)
+  {
+    char c= sql[i];
+
+    // Skip single-quoted string literals, handling '' escapes.
+    if (c == '\'')
+    {
+      out += c; i++;
+      while (i < n)
+      {
+        out += sql[i];
+        if (sql[i++] == '\'')
+        {
+          if (i < n && sql[i] == '\'') { out += sql[i++]; } // escaped ''
+          else break;
+        }
+      }
+      continue;
+    }
+
+    // Skip double-quoted identifiers.
+    if (c == '"')
+    {
+      out += c; i++;
+      while (i < n && sql[i] != '"') out += sql[i++];
+      if (i < n) { out += sql[i++]; }
+      continue;
+    }
+
+    // Check for a whole-word match of from_func followed by '('.
+    if (i + flen <= n &&
+        strncasecmp(sql.c_str() + i, from_func, flen) == 0 &&
+        (i == 0 || (!isalnum((unsigned char)sql[i-1]) && sql[i-1] != '_')))
+    {
+      size_t j= i + flen;
+      while (j < n && sql[j] == ' ') j++;   // allow spaces before '('
+      if (j < n && sql[j] == '(')
+      {
+        out += to_func;
+        i += flen;
+        continue;
+      }
+    }
+
+    out += c; i++;
+  }
+  return out;
+}
+
+// Apply all MariaDB→DuckDB function rewrites in one pass.
+static std::string rewrite_mariadb_sql(const std::string &sql)
+{
+  std::string s= sql;
+  // str_to_date(str, fmt) → strptime(str, fmt)
+  // Same argument order; DuckDB just uses a different name.
+  // Cannot use a macro because DuckDB strptime() requires a constant
+  // format string (compile-time constraint), which a macro parameter
+  // cannot satisfy.
+  s= rewrite_func_name(s, "str_to_date", "strptime");
+  return s;
+}
+
+// ---------------------------------------------------------------------------
 // Select handler — full query pushdown
 // ---------------------------------------------------------------------------
 
@@ -1015,6 +1096,9 @@ int ha_duckdb_select_handler::init_scan()
   // MariaDB print() uses backtick quoting; DuckDB expects double quotes.
   for (char &c : sql)
     if (c == '`') c = '"';
+
+  // Rewrite MariaDB function names that can't be handled by macros.
+  sql= rewrite_mariadb_sql(sql);
 
   try
   {
