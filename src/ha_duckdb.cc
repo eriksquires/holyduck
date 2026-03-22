@@ -636,9 +636,26 @@ int ha_duckdb::info(uint flag)
   {
     try
     {
-      auto r= connection->Query("SELECT COUNT(*) FROM " + duckdb_table_name);
+      // Row count from DuckDB's own per-table estimate — no full scan needed
+      std::string tname= std::string(table->s->table_name.str);
+      auto r= connection->Query(
+        "SELECT estimated_size FROM duckdb_tables() "
+        "WHERE schema_name='" + db_name + "' AND table_name='" + tname + "'");
       if (!r->HasError() && r->RowCount() > 0)
         stats.records= (ha_rows)r->GetValue(0, 0).GetValue<int64_t>();
+
+      // Actual compressed on-disk size from DuckDB storage metadata
+      // 262144 = DuckDB's default block size (256KB)
+      r= connection->Query(
+        "SELECT COUNT(DISTINCT block_id) * 262144 "
+        "FROM pragma_storage_info('" + duckdb_table_name + "') "
+        "WHERE block_id > 0");
+      if (!r->HasError() && r->RowCount() > 0)
+      {
+        stats.data_file_length= (ulonglong)r->GetValue(0, 0).GetValue<int64_t>();
+        if (stats.records > 0)
+          stats.mean_rec_length= (ulong)(stats.data_file_length / stats.records);
+      }
     }
     catch (...) {}
   }
