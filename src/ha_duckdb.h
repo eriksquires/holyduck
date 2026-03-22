@@ -57,6 +57,10 @@ class ha_duckdb: public handler
   duckdb::MaterializedQueryResult* scan_result;
   size_t scan_row;
 
+  // Bulk insert state — Appender kept open across write_row() calls
+  // Stored as void* to avoid needing full duckdb.hpp in the header
+  void* bulk_appender;
+
   // Per-open metadata (public so create_duckdb_select_handler can read them)
 public:
   std::string db_file_path;
@@ -83,6 +87,9 @@ public:
   int create(const char *name, TABLE *table_arg, HA_CREATE_INFO *create_info);
   int delete_table(const char *name);
   int rename_table(const char *from, const char *to);
+
+  void start_bulk_insert(ha_rows rows, uint flags);
+  int  end_bulk_insert();
 
   int write_row(const uchar *buf);
   int update_row(const uchar *old_data, const uchar *new_data);

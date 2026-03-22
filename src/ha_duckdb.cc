@@ -210,11 +210,12 @@ DuckDB_share::~DuckDB_share()
 
 ha_duckdb::ha_duckdb(handlerton *hton, TABLE_SHARE *table_arg)
   :handler(hton, table_arg), share(nullptr), connection(nullptr),
-   scan_result(nullptr), scan_row(0)
+   scan_result(nullptr), scan_row(0), bulk_appender(nullptr)
 {}
 
 ha_duckdb::~ha_duckdb()
 {
+  delete static_cast<duckdb::Appender*>(bulk_appender);
   delete scan_result;
 }
 
@@ -407,6 +408,45 @@ int ha_duckdb::rename_table(const char *from, const char *to)
 }
 
 // ---------------------------------------------------------------------------
+// Bulk insert — keep one Appender open across all write_row() calls
+// ---------------------------------------------------------------------------
+
+void ha_duckdb::start_bulk_insert(ha_rows rows, uint flags)
+{
+  if (!connection) return;
+  try
+  {
+    bulk_appender= new duckdb::Appender(*connection, db_name,
+                                        table->s->table_name.str);
+  }
+  catch (const std::exception &e)
+  {
+    sql_print_error("DuckDB: start_bulk_insert failed: %s", e.what());
+    bulk_appender= nullptr;
+  }
+}
+
+int ha_duckdb::end_bulk_insert()
+{
+  if (!bulk_appender) return 0;
+  duckdb::Appender *app= static_cast<duckdb::Appender*>(bulk_appender);
+  try
+  {
+    app->Close();
+  }
+  catch (const std::exception &e)
+  {
+    sql_print_error("DuckDB: end_bulk_insert flush failed: %s", e.what());
+    delete app;
+    bulk_appender= nullptr;
+    return HA_ERR_INTERNAL_ERROR;
+  }
+  delete app;
+  bulk_appender= nullptr;
+  return 0;
+}
+
+// ---------------------------------------------------------------------------
 // Row write
 // ---------------------------------------------------------------------------
 
@@ -417,13 +457,22 @@ int ha_duckdb::write_row(const uchar *buf)
 
   try
   {
-    duckdb::Appender appender(*connection, db_name, table->s->table_name.str);
-    appender.BeginRow();
+    // Reuse the bulk appender if open, otherwise use a one-shot
+    std::unique_ptr<duckdb::Appender> one_shot;
+    duckdb::Appender *appender= static_cast<duckdb::Appender*>(bulk_appender);
+    if (!appender)
+    {
+      one_shot.reset(new duckdb::Appender(*connection, db_name,
+                                          table->s->table_name.str));
+      appender= one_shot.get();
+    }
+
+    appender->BeginRow();
 
     for (uint i= 0; i < table->s->fields; i++)
     {
       Field *field= table->field[i];
-      if (field->is_null()) { appender.Append<nullptr_t>(nullptr); continue; }
+      if (field->is_null()) { appender->Append<nullptr_t>(nullptr); continue; }
 
       switch (field->type())
       {
@@ -431,24 +480,24 @@ int ha_duckdb::write_row(const uchar *buf)
         case MYSQL_TYPE_SHORT:
         case MYSQL_TYPE_LONG:
         case MYSQL_TYPE_INT24:
-          appender.Append<int32_t>((int32_t)field->val_int()); break;
+          appender->Append<int32_t>((int32_t)field->val_int()); break;
         case MYSQL_TYPE_LONGLONG:
-          appender.Append<int64_t>(field->val_int()); break;
+          appender->Append<int64_t>(field->val_int()); break;
         case MYSQL_TYPE_FLOAT:
-          appender.Append<float>((float)field->val_real()); break;
+          appender->Append<float>((float)field->val_real()); break;
         case MYSQL_TYPE_DOUBLE:
-          appender.Append<double>(field->val_real()); break;
+          appender->Append<double>(field->val_real()); break;
         default:
         {
           String s; field->val_str(&s, &s);
-          appender.Append(duckdb::Value(std::string(s.ptr(), s.length())));
+          appender->Append(duckdb::Value(std::string(s.ptr(), s.length())));
           break;
         }
       }
     }
 
-    appender.EndRow();
-    appender.Flush();
+    appender->EndRow();
+    if (one_shot) one_shot->Flush();  // only flush immediately for single rows
   }
   catch (const std::exception &e)
   {
