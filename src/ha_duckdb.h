@@ -116,7 +116,21 @@ public:
   }
 
   ulong index_flags(uint inx, uint part, bool all_parts) const
-  { return HA_NULL_IN_KEY; }
+  {
+    // Intentionally returns no read-scan flags (HA_READ_NEXT etc.).
+    //
+    // DuckDB indexes are used internally by DuckDB's own query planner when
+    // a query is pushed down via ha_duckdb_select_handler.  Exposing index
+    // scan capability to MariaDB (by returning HA_READ_NEXT etc.) would allow
+    // the optimizer to drive cross-engine joins by range-scanning the DuckDB
+    // table row-by-row through the handler API — one call per row, serialised,
+    // bypassing DuckDB's vectorised execution and parallelism entirely.
+    //
+    // Keeping this empty forces MariaDB to either push the whole query to
+    // DuckDB (best case) or do a single batched full scan (acceptable), and
+    // prevents it from choosing a naïve row-at-a-time index scan path.
+    return HA_NULL_IN_KEY;
+  }
 
   uint max_supported_record_length() const { return HA_MAX_REC_LENGTH; }
   uint max_supported_keys()          const { return 64; }
