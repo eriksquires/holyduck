@@ -1,6 +1,6 @@
-# MariaDB DuckDB Storage Engine — Project Status
+# MariaDB DuckDB Storage Engine — Technical Reference
 
-## What Works (as of 2026-03-22, updated same day)
+## Feature Status
 
 ### DDL
 - `CREATE TABLE ... ENGINE=DUCKDB` — creates a shared `#duckdb/global.duckdb` file per database
@@ -37,8 +37,7 @@
   SELECT s.name, a.avg_val FROM innodb_sensors s JOIN agg a ON s.id = a.sensor_id;
   ```
 - **Condition pushdown** via `cond_push()`: For cross-engine joins, WHERE conditions are pushed
-  into the DuckDB scan query.  EXPLAIN shows `Using where with pushed condition`.
-  Verified: 1-month date filter returns 12,488 rows instead of 300,000.
+  into the DuckDB scan query. EXPLAIN shows `Using where with pushed condition`.
 - **Column subset scan**: For cross-engine joins, `rnd_init()` reads `table->read_set` and emits
   `SELECT col1, col2` instead of `SELECT *`, reducing data transfer.
 
@@ -73,7 +72,7 @@ Macros live in `sql/duckdb_mariadb_compat.sql` — edit and redeploy without rec
 | VARCHAR, TEXT, BLOB, etc. | VARCHAR |
 
 ### Cross-Engine Joins
-MariaDB can join DUCKDB tables with InnoDB tables.  The optimizer uses `type=ALL` for the
+MariaDB can join DUCKDB tables with InnoDB tables. The optimizer uses `type=ALL` for the
 DuckDB table (intentional — see Architecture below) and `eq_ref` for InnoDB lookups.
 Condition pushdown reduces the rows DuckDB returns before the join.
 
@@ -119,54 +118,31 @@ The safe pattern is: add new column → populate it → drop old column → rena
 |---|---|
 | Column type changes | Not supported — use add/populate/rename/drop pattern |
 | `INSERT ... ON DUPLICATE KEY UPDATE` | Not supported |
-| Aggregation pushdown (cross-engine) | Direct cross-engine joins: aggregations run in MariaDB. Workaround: wrap DuckDB aggregation in a CTE — `PUSHED DERIVED` fires and runs it in DuckDB |
-| Bulk INSERT constraint errors | Returns error 1030 instead of 1022 (ugly but correct — batch rejected) |
+| Aggregation pushdown (cross-engine) | Aggregations run in MariaDB; workaround: wrap DuckDB aggregation in a CTE — `PUSHED DERIVED` fires and runs it in DuckDB |
+| Bulk INSERT constraint errors | Returns error 1030 instead of 1022 (batch rejected, correct behavior) |
 
-## File Layout
+## Repository Layout
 
 ```
-mariadb-duckdb-plugin/
 ├── src/
-│   ├── ha_duckdb.cc         # Storage engine implementation
-│   ├── ha_duckdb.h          # Header
-│   └── CMakeLists.txt       # Standalone build (points at MariaDB source tree)
+│   ├── ha_duckdb.cc              # Storage engine implementation
+│   ├── ha_duckdb.h               # Header
+│   └── CMakeLists.txt            # Standalone cmake build
 ├── sql/
-│   └── duckdb_mariadb_compat.sql  # MariaDB→DuckDB function macros (deployment artifact)
-├── lib/
-│   ├── libduckdb.so         # DuckDB v1.5.0
-│   ├── duckdb.h / duckdb.hpp
-├── build/                   # cmake output — gitignored
-│   └── ha_duckdb.so
-├── data/                    # MariaDB data dir (bind-mounted into container) — gitignored
+│   └── duckdb_mariadb_compat.sql # MariaDB→DuckDB function macros
 ├── docker/
-│   └── base-ubuntu.dockerfile
-└── scripts/
-    ├── deploy.sh            # Build + deploy into test container (USE THIS)
-    └── docker-run.sh        # Start dev container
+│   ├── base-ubuntu.dockerfile
+│   ├── base-oracle8.dockerfile
+│   ├── base-oracle9.dockerfile
+│   └── base-debian12.dockerfile
+├── scripts/
+│   ├── fetch-deps.sh             # Download MariaDB source + DuckDB library
+│   ├── build-base.sh             # Build Docker base image
+│   ├── docker-run.sh             # Start dev container
+│   ├── cmake-setup.sh            # Build MariaDB + configure plugin cmake
+│   └── deploy.sh                 # Build plugin + deploy into container
+└── lib/                          # gitignored — populated by fetch-deps.sh
+    ├── libduckdb.so
+    ├── duckdb.hpp
+    └── duckdb.h
 ```
-
-## Development Workflow
-
-See `DOCKER_WORKFLOW.md` for the full workflow.  The short version:
-
-```bash
-# Edit source locally
-vim src/ha_duckdb.cc
-
-# Build, deploy, restart MariaDB, verify — all in one step
-./scripts/deploy.sh
-
-# Connect and test
-docker exec -it duckdb-plugin-test mariadb -uroot -ptestpass
-```
-
-## Environment
-
-| Component | Location |
-|---|---|
-| Plugin source | `/home/shared/mariadb/mariadb-duckdb-plugin/src/` |
-| Build output | `/home/shared/mariadb/mariadb-duckdb-plugin/build/` |
-| MariaDB source | `/home/erik/shared/mariadb/mariadb-11.8.3-git/` |
-| DuckDB library | `/home/shared/mariadb/mariadb-duckdb-plugin/lib/` |
-| Test container | `duckdb-plugin-test` (Ubuntu 22.04, MariaDB 11.8.3) |
-| MariaDB data | `/home/shared/mariadb/mariadb-duckdb-plugin/data/` (bind-mounted) |

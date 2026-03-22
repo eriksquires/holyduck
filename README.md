@@ -1,0 +1,151 @@
+# ha_duckdb — DuckDB Storage Engine for MariaDB
+
+A MariaDB storage engine plugin that embeds [DuckDB](https://duckdb.org/) as a first-class storage engine. Create tables with `ENGINE=DUCKDB` and query them with standard SQL — DuckDB handles the heavy lifting.
+
+## Why
+
+DuckDB is a fast, embeddable analytical database. This plugin lets you use it directly inside MariaDB, so you can:
+
+- Run analytical queries (GROUP BY, aggregations, window functions) at DuckDB speed
+- Mix DuckDB and InnoDB tables in the same query — DuckDB for analytics, InnoDB for OLTP
+- Use CTEs to pre-aggregate DuckDB data, then join the small result against InnoDB tables
+
+## Quick Example
+
+```sql
+-- Analytical table in DuckDB
+CREATE TABLE metrics (ts DATETIME, sensor_id INT, val DOUBLE) ENGINE=DUCKDB;
+
+-- Lookup table in InnoDB
+CREATE TABLE sensors (id INT PRIMARY KEY, name VARCHAR(64)) ENGINE=InnoDB;
+
+-- Mixed-engine query — DuckDB aggregation pushed down, joined against InnoDB
+WITH agg AS (
+    SELECT sensor_id, AVG(val) AS avg_val
+    FROM metrics
+    GROUP BY sensor_id
+)
+SELECT s.name, a.avg_val
+FROM sensors s
+JOIN agg a ON s.id = a.sensor_id;
+```
+
+EXPLAIN confirms the CTE runs entirely inside DuckDB (`PUSHED DERIVED`), returning a small result for MariaDB to join.
+
+## Requirements
+
+- Linux x86-64
+- Docker
+- MariaDB 11.8.3 source tree (cloned by `fetch-deps.sh`)
+- DuckDB v1.5.0 (downloaded by `fetch-deps.sh`)
+
+## Getting Started
+
+### 1. Fetch dependencies
+
+```bash
+./scripts/fetch-deps.sh
+export MARIADB_SRC_DIR=<path printed by fetch-deps.sh>
+```
+
+This clones the MariaDB 11.8.3 source tree and downloads `libduckdb.so`. Both versions are configurable:
+
+```bash
+MARIADB_VERSION=11.8.3 DUCKDB_VERSION=v1.5.0 ./scripts/fetch-deps.sh
+```
+
+### 2. Build the Docker base image
+
+```bash
+./scripts/build-base.sh ubuntu     # Ubuntu 22.04
+./scripts/build-base.sh oracle8    # Oracle Linux 8
+./scripts/build-base.sh oracle9    # Oracle Linux 9
+```
+
+### 3. Start a container
+
+```bash
+./scripts/docker-run.sh ubuntu
+```
+
+### 4. Build MariaDB and configure the plugin (first time only, ~20-30 min)
+
+```bash
+./scripts/cmake-setup.sh duckdb-plugin-dev-ubuntu
+```
+
+This builds MariaDB from source inside the container and configures the plugin's cmake. Build artifacts persist via the bind-mounted source directory — subsequent runs skip the MariaDB build.
+
+### 5. Build and deploy the plugin
+
+```bash
+./scripts/deploy.sh duckdb-plugin-dev-ubuntu
+```
+
+Builds `ha_duckdb.so`, copies it into the container, restarts MariaDB, installs the plugin, and verifies it loaded. Run this after every code change.
+
+### 6. Connect and test
+
+```bash
+docker exec -it duckdb-plugin-dev-ubuntu mariadb -uroot -ptestpass
+```
+
+```sql
+CREATE TABLE t (id INT, val DOUBLE) ENGINE=DUCKDB;
+INSERT INTO t VALUES (1, 10.5), (2, 20.0), (3, 15.5);
+SELECT AVG(val) FROM t;
+```
+
+## Pre-built Binaries
+
+Pre-built `.so` files for each distro are available on the [Releases](../../releases) page. Download the appropriate file, place it in your MariaDB plugin directory, and:
+
+```sql
+INSTALL PLUGIN duckdb SONAME 'ha_duckdb.so';
+```
+
+## Development Workflow
+
+```bash
+# Edit source
+vim src/ha_duckdb.cc
+
+# Build, deploy, restart MariaDB, verify — one command
+./scripts/deploy.sh duckdb-plugin-dev-ubuntu
+
+# Connect
+docker exec -it duckdb-plugin-dev-ubuntu mariadb -uroot -ptestpass
+```
+
+## Query Pushdown
+
+The engine implements three pushdown paths:
+
+| EXPLAIN output | When it fires | What runs in DuckDB |
+|---|---|---|
+| `PUSHED SELECT` | All tables in query are DUCKDB | Entire SELECT including GROUP BY, ORDER BY |
+| `PUSHED UNION` | All arms of UNION/INTERSECT/EXCEPT are DUCKDB | Entire set operation |
+| `PUSHED DERIVED` | CTE or subquery references only DUCKDB tables | Entire CTE/subquery |
+
+For mixed-engine queries, condition pushdown (`cond_push()`) and column subset scanning reduce the data DuckDB returns to MariaDB.
+
+## MariaDB Compatibility Macros
+
+`sql/duckdb_mariadb_compat.sql` defines DuckDB macros that translate common MariaDB functions:
+`DATE_FORMAT`, `UNIX_TIMESTAMP`, `FROM_UNIXTIME`, `IF`, `LOCATE`, `FIND_IN_SET`, `RoundDateTime`, and others.
+
+Edit the file and redeploy without recompiling.
+
+## Known Limitations
+
+| Area | Notes |
+|---|---|
+| `ALTER TABLE MODIFY COLUMN` | Type changes not supported — use add/populate/drop/rename pattern |
+| `INSERT ... ON DUPLICATE KEY UPDATE` | Not supported |
+| Cross-engine aggregation | Wrap in a CTE to push aggregation into DuckDB (`PUSHED DERIVED`) |
+
+See [TECHNICAL.md](TECHNICAL.md) for full details on architecture and internals.
+
+## License
+
+[MIT](LICENSE)
