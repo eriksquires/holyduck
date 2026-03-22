@@ -37,7 +37,7 @@ class DuckDB_share : public Handler_share {
 public:
   mysql_mutex_t mutex;
   THR_LOCK lock;
-  std::string db_file_path;    // path to #duckdb/<db>.duckdb
+  std::string db_file_path;    // path to #duckdb/global.duckdb
 
   DuckDB_share();
   ~DuckDB_share();
@@ -111,15 +111,17 @@ public:
 
   ulonglong table_flags() const
   {
-    return (HA_REC_NOT_IN_SEQ | HA_NO_BLOBS | HA_BINLOG_STMT_CAPABLE);
+    return (HA_REC_NOT_IN_SEQ | HA_NO_BLOBS | HA_BINLOG_STMT_CAPABLE |
+            HA_NULL_IN_KEY);
   }
 
-  ulong index_flags(uint inx, uint part, bool all_parts) const { return 0; }
+  ulong index_flags(uint inx, uint part, bool all_parts) const
+  { return HA_NULL_IN_KEY; }
 
   uint max_supported_record_length() const { return HA_MAX_REC_LENGTH; }
-  uint max_supported_keys()          const { return 0; }
-  uint max_supported_key_parts()     const { return 0; }
-  uint max_supported_key_length()    const { return 0; }
+  uint max_supported_keys()          const { return 64; }
+  uint max_supported_key_parts()     const { return 16; }
+  uint max_supported_key_length()    const { return 3072; }
 
   IO_AND_CPU_COST scan_time()
   {

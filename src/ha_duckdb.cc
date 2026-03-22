@@ -387,6 +387,27 @@ int ha_duckdb::create(const char *name, TABLE *table_arg,
       DBUG_RETURN(1);
     }
 
+    // Create indexes in DuckDB — used by DuckDB's own query planner
+    for (uint i= 0; i < table_arg->s->keys; i++)
+    {
+      KEY *key= &table_arg->key_info[i];
+      bool is_unique= (key->flags & HA_NOSAME);
+      std::ostringstream idx;
+      idx << (is_unique ? "CREATE UNIQUE INDEX " : "CREATE INDEX ");
+      idx << "idx_" << p.table_name << "_" << key->name.str;
+      idx << " ON " << p.qualified_table << " (";
+      for (uint j= 0; j < key->user_defined_key_parts; j++)
+      {
+        if (j > 0) idx << ", ";
+        idx << '"' << key->key_part[j].field->field_name.str << '"';
+      }
+      idx << ")";
+      auto ri= conn.Query(idx.str());
+      if (ri->HasError())
+        sql_print_warning("DuckDB: index creation failed for %s: %s",
+                          key->name.str, ri->GetError().c_str());
+    }
+
     registry_release(p.db_file);
     sql_print_information("DuckDB: created table %s", p.qualified_table.c_str());
   }
