@@ -68,10 +68,14 @@ Macros live in `sql/duckdb_mariadb_compat.sql` — edit and redeploy without rec
 
 ## Writing Queries for HolyDuck
 
-The most important thing to understand about mixed-engine queries: **MariaDB cannot push
-aggregations across engine boundaries**. If your query joins a DuckDB table directly against
-an InnoDB table and groups the result, MariaDB scans every DuckDB row and does the GROUP BY
-itself. For large DuckDB tables this is the difference between milliseconds and minutes.
+The most important thing to understand about mixed-engine queries: **MariaDB will push
+WHERE conditions down to DuckDB**, so date filters, range filters, and equality conditions
+on DuckDB columns all execute inside DuckDB before rows are returned. What MariaDB
+*cannot* push down are filters that depend on values from another table (e.g. `WHERE s.id = c.id`),
+and it cannot push aggregations across engine boundaries. If your query joins a DuckDB table
+directly against an InnoDB table and groups the result, MariaDB receives the filtered DuckDB
+rows and performs the GROUP BY itself. For large DuckDB tables this is the difference between
+milliseconds and minutes.
 
 The solution is to restructure the query so the heavy DuckDB work happens in a CTE or
 subquery first — then `PUSHED DERIVED` fires and the entire aggregation runs inside DuckDB,
@@ -99,9 +103,9 @@ GROUP BY c.name, r.name
 ORDER BY total_sales DESC;
 ```
 
-What happens: MariaDB scans all matching rows from `sales` (potentially millions after the date
-filter), streams them to the join, then performs the GROUP BY. DuckDB returns raw rows instead
-of aggregated results.
+What happens: MariaDB pushes the date filter into DuckDB, so only the matching rows come back —
+that part works well. But the GROUP BY runs in MariaDB after the join, meaning potentially
+hundreds of thousands of filtered rows flow across the engine boundary before aggregation happens.
 
 **Optimized with CTE — fast:**
 
