@@ -3,7 +3,7 @@ project(ha_duckdb)
 
 # Paths to MariaDB source and build trees - override these at cmake time:
 #   cmake -DMARIADB_SOURCE_DIR=... -DMARIADB_BUILD_DIR=...
-set(MARIADB_SOURCE_DIR "/home/erik/shared/mariadb/mariadb-11.8.3-git"
+set(MARIADB_SOURCE_DIR "/mariadb-src"
     CACHE PATH "Path to MariaDB source tree")
 set(MARIADB_BUILD_DIR  "${MARIADB_SOURCE_DIR}/build"
     CACHE PATH "Path to MariaDB build tree (where cmake was run)")
