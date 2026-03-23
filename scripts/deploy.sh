@@ -64,7 +64,8 @@ ok "Build complete: $(ls -sh "${BUILD_DIR}/libha_duckdb.so" | awk '{print $1}')"
 # ── 4. Copy plugin and companion SQL file ─────────────────────────────────────
 info "Copying plugin into container..."
 docker cp "${BUILD_DIR}/libha_duckdb.so"            "${CONTAINER}:${PLUGIN_DEST}/ha_duckdb.so"
-docker cp "${BUILD_DIR}/duckdb_mariadb_compat.sql"  "${CONTAINER}:${PLUGIN_DEST}/duckdb_mariadb_compat.sql"
+docker cp "${BUILD_DIR}/holyduck_duckdb_extensions.sql"  "${CONTAINER}:${PLUGIN_DEST}/holyduck_duckdb_extensions.sql"
+docker cp "${PLUGIN_DIR}/sql/holyduck_mariadb_functions.sql" "${CONTAINER}:${PLUGIN_DEST}/holyduck_mariadb_functions.sql"
 ok "Files copied."
 
 # ── 5. Restart MariaDB ────────────────────────────────────────────────────────

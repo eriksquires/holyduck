@@ -51,7 +51,7 @@ static mysql_mutex_t g_duckdb_mutex;
 // Uses CREATE OR REPLACE MACRO so re-opening the file after an upgrade
 // always refreshes the definitions.
 //
-// Primary source: <plugin_dir>/duckdb_mariadb_compat.sql  (editable without
+// Primary source: <plugin_dir>/holyduck_duckdb_extensions.sql  (editable without
 //                 recompiling — add or fix macros, restart MariaDB)
 // Fallback:       the built-in list below, used when the file is absent.
 // ---------------------------------------------------------------------------
@@ -107,7 +107,7 @@ static void install_mariadb_compat_macros(duckdb::DuckDB *db)
   duckdb::Connection conn(*db);
 
   // Try the external SQL file first.
-  std::string sql_file= std::string(opt_plugin_dir) + "/duckdb_mariadb_compat.sql";
+  std::string sql_file= std::string(opt_plugin_dir) + "/holyduck_duckdb_extensions.sql";
   std::ifstream f(sql_file);
   if (f.good())
   {

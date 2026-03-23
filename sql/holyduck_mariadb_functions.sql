@@ -12,7 +12,7 @@
 --   mariadb -uroot -p mydb < holyduck_mariadb_functions.sql
 --
 -- The matching DuckDB macros are installed automatically at plugin
--- startup from duckdb_mariadb_compat.sql.
+-- startup from holyduck_duckdb_extensions.sql.
 --
 
 -- ---------------------------------------------------------------------------

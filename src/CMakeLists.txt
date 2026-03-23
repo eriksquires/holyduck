@@ -61,7 +61,7 @@ message(STATUS "DuckDB dir:     ${DUCKDB_DIR}")
 # Copy the companion SQL macro file next to the built .so so it can be
 # deployed alongside it and found at runtime via opt_plugin_dir.
 configure_file(
-  ${CMAKE_CURRENT_SOURCE_DIR}/../sql/duckdb_mariadb_compat.sql
-  ${CMAKE_CURRENT_BINARY_DIR}/duckdb_mariadb_compat.sql
+  ${CMAKE_CURRENT_SOURCE_DIR}/../sql/holyduck_duckdb_extensions.sql
+  ${CMAKE_CURRENT_BINARY_DIR}/holyduck_duckdb_extensions.sql
   COPYONLY
 )

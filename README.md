@@ -37,7 +37,7 @@ FROM sensors s
 JOIN agg a ON s.id = a.sensor_id;
 ```
 
-EXPLAIN confirms the CTE runs entirely inside DuckDB (`PUSHED DERIVED`), returning a small result for MariaDB to join. See [TECHNICAL.md](TECHNICAL.md) for query optimization patterns and pushdown details.
+EXPLAIN confirms the CTE runs entirely inside DuckDB (`PUSHED DERIVED`), returning a small result for MariaDB to join. See [WRITING_SQL.md](WRITING_SQL.md) for query optimization patterns and pushdown details. For architecture and internals see [INTERNALS.md](INTERNALS.md).
 
 ## HolyDuck vs ColumnStore
 
@@ -99,12 +99,12 @@ ldconfig
 
 ### 3. Copy the plugin files
 
-Download `ha_duckdb-<distro>.so` and `duckdb_mariadb_compat.sql` from the [HolyDuck releases page](https://github.com/eriksquires/HolyDuck/releases),
+Download `ha_duckdb-<distro>.so` and `holyduck_duckdb_extensions.sql` from the [HolyDuck releases page](https://github.com/eriksquires/HolyDuck/releases),
 then copy both into your plugin directory:
 
 ```bash
 cp ha_duckdb-ubuntu22.so /path/to/plugin_dir/ha_duckdb.so
-cp duckdb_mariadb_compat.sql /path/to/plugin_dir/duckdb_mariadb_compat.sql
+cp holyduck_duckdb_extensions.sql /path/to/plugin_dir/holyduck_duckdb_extensions.sql
 ```
 
 ### 4. Install the plugin
