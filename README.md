@@ -65,7 +65,7 @@ HolyDuck tables are native DuckDB tables that live and grow in a DuckDB database
 
 ## HolyDuck vs. Remote Scanning
 
-HolyDuck is the opposite of using Duck's remote scanning features.  While remote scanning works with any table on a remote server, HolyDuck only works on tables created by it.  
+HolyDuck is the opposite of using Duck's remote scanning features.  While remote scanning works with any table on a remote server, HolyDuck only takes responsibility for tables in DuckDB. 
 
 ## DuckDB Limitations
 
