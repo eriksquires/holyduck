@@ -2,7 +2,7 @@
 
 *Bringing divine analytical powers to Maria.*
 
-**HolyDuck** (`ha_duckdb`) is a MariaDB storage engine plugin that embeds [DuckDB](https://duckdb.org/) as a first-class storage engine. Create tables with `ENGINE=DUCKDB` and query them with standard SQL — DuckDB handles the heavy lifting.
+**HolyDuck** (`ha_duckdb`) is a MariaDB storage engine plugin that embeds [DuckDB](https://duckdb.org/) as a first-class storage engine next to InnoDB. Create tables with `ENGINE=DUCKDB` and query them with standard SQL — DuckDB handles the heavy lifting.
 
 ## Why
 
@@ -11,8 +11,9 @@ MariaDB is beloved. DuckDB is a miracle of analytical performance. Maria deserve
 HolyDuck is that blessing — it embeds DuckDB directly inside MariaDB so you can:
 
 - Run analytical queries (GROUP BY, aggregations, window functions) at DuckDB speed
-- Mix DuckDB and InnoDB tables in the same query — DuckDB for analytics, InnoDB for OLTP
-- Use CTEs to pre-aggregate DuckDB data, then join the small result against InnoDB tables
+- Mix DuckDB and InnoDB tables in the same query — DuckDB for analytics
+
+HolyDuck is an extremely easy to install easy to use OLAP engine that lives inside your existing MariaDB data infrastructure.  The speed of a parallel column store database with the convenience of MariaDB with incredibly simple installation. 
 
 ## Quick Example
 
@@ -69,6 +70,8 @@ HolyDuck is the opposite of using Duck's remote scanning features.  While remote
 HoldyDuck is much more team friendly in a sense than DuckDB alone but it's a gift, not magic. 
 
 DuckDB does not handle more than one write connection at a time.  HolyDuck does, but the entire engine blocks per write operation.  That is, you and your colleagues can open and access the host MariaDB instance and query all the tables you normally would inside and outside of DuckDB but any DuckDB change operations will block all other DuckDB writers.   This naturally promotes a pattern of using DuckDB for scanning very big tables to create smaller InnoDB which need more frequent edits/refactoring.  
+
+Another important limitation is that MariaDB enforces SQL correctness.  You can't run anything against DuckDB that MariaDB won't allow. 
 
 ## Installation
 
