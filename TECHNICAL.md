@@ -160,8 +160,9 @@ The tool gets fast results without any knowledge of the underlying engine.
 ## Extending with Custom Functions — The Dual Implementation Pattern
 
 MariaDB's parser must recognize every function name in a query before pushdown decisions are made.
-This means a DuckDB macro alone is not enough — if MariaDB doesn't know the function, the query
-is rejected before it ever reaches DuckDB.
+If MariaDB doesn't know the function, the query is rejected before it ever reaches DuckDB. This
+can be an issue when trying to take advantage of DuckDB functions or creating a new macro
+just for DuckDB. 
 
 The solution is a **dual implementation** across two files:
 
@@ -174,10 +175,9 @@ MariaDB sees this. It satisfies the parser and provides a fallback for non-DuckD
 ### Example 1: RoundDateTime on a DuckDB table
 
 We do a lot of time series analysis and downsampling of metrics so we use a function RoundDateTime() 
-that takes arbitrary seconds size buckets to round down to.  60, 300, 600, etc. We'll use it 
-here as an example. 
-
-To make this work in both MariaDB and DuckDB we need to make each engine aware of it. 
+that takes arbitrary seconds size buckets to round down to such as 60, 300, 600, etc. We'll use it 
+here as an example.  Maybe we only care about it in DuckDB but in order for DuckDB to receive the
+SQL with it we must make MariaDB aware of it.
 
 `duckdb_mariadb_compat.sql` contains the DuckDB macro:
 ```sql
@@ -196,7 +196,7 @@ RETURNS DATETIME DETERMINISTIC
 RETURN FROM_UNIXTIME(FLOOR(UNIX_TIMESTAMP(dt) / bucket_secs) * bucket_secs);
 ```
 Notice that the definition is slightly different, as the DuckDB macro is optimized
-for DuckDB.
+for DuckDB but they are functionally equivalent. 
 
 ### Example 1: RoundDateTime on a DuckDB table
 Query against a DuckDB table:
