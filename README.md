@@ -58,6 +58,8 @@ One big benefit, if you can live with single writers, is you now have a sharable
 
 If your workload fits on one machine, HolyDuck will likely be faster and infinitely simpler to run.
 
+Unlike DuckDB accelerators or scanners that read and translate data from an external source at query time, HolyDuck tables are native DuckDB tables that live and grow in a DuckDB database — no external connections or translations occur.
+
 ## DuckDB Limitations
 
 DuckDB does not handle more than one write connection at a time.  HolyDuck does, but the entire engine blocks per write operation.  That is, you and your colleagues can open and access DuckDB tables and queries against them, if anyone start any change operation you will block all other writers.  
