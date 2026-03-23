@@ -60,11 +60,15 @@ If your workload fits on one machine, HolyDuck will likely be faster and infinit
 
 HolyDuck tables are native DuckDB tables that live and grow in a DuckDB database — no external connections or translations occur.
 
+## HolyDuck vs. Remote Scanning
+
+HolyDuck is the opposite of using Duck's remote scanning features.  While remote scanning works with any table on a remote server, HolyDuck only works on tables created by it.  
+
 ## DuckDB Limitations
 
-DuckDB does not handle more than one write connection at a time.  HolyDuck does, but the entire engine blocks per write operation.  That is, you and your colleagues can open and access DuckDB tables and queries against them, if anyone start any change operation you will block all other writers.  
+HoldyDuck is much more team friendly in a sense than DuckDB alone but it's a gift, not magic. 
 
-HoldyDuck is much more team friendly in a sense than raw DuckDB, but it's a gift, not magic.  
+DuckDB does not handle more than one write connection at a time.  HolyDuck does, but the entire engine blocks per write operation.  That is, you and your colleagues can open and access the host MariaDB instance and query all the tables you normally would inside and outside of DuckDB but any DuckDB change operations will block all other DuckDB writers.   This naturally promotes a pattern of using DuckDB for scanning very big tables to create smaller InnoDB which need more frequent edits/refactoring.  
 
 ## Installation
 
@@ -112,3 +116,7 @@ This project is dual-licensed:
   Any derivative works must also be GPL v2.
 - **[Commercial License](LICENSE-COMMERCIAL)** — for use in proprietary or closed-source
   products without GPL obligations. Contact via [GitHub](https://github.com/eriksquires).
+
+## Acknowledgements
+
+Clearly this project being just a shim between two data stores could not exist without the hard work and excellent contributions of the [DuckDB](https://duckdb.org/) and [MariaDB Foundation](https://mariadb.org/) teams and all those who have contributed before.  
