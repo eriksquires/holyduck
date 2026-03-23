@@ -85,9 +85,20 @@ Pre-built binaries are available on the [Releases](https://github.com/eriksquire
 SELECT @@plugin_dir;
 ```
 
-### 2. Copy the files
+### 2. Install libduckdb.so
 
-Download `ha_duckdb-<distro>.so` and `duckdb_mariadb_compat.sql` from the release page,
+HolyDuck v0.2.0 requires DuckDB v1.5.0. Download `libduckdb-linux-amd64.zip` from the
+[DuckDB releases page](https://github.com/duckdb/duckdb/releases/tag/v1.5.0), then:
+
+```bash
+unzip libduckdb-linux-amd64.zip libduckdb.so
+cp libduckdb.so /usr/lib/libduckdb.so
+ldconfig
+```
+
+### 3. Copy the plugin files
+
+Download `ha_duckdb-<distro>.so` and `duckdb_mariadb_compat.sql` from the [HolyDuck releases page](https://github.com/eriksquires/HolyDuck/releases),
 then copy both into your plugin directory:
 
 ```bash
@@ -95,13 +106,13 @@ cp ha_duckdb-ubuntu22.so /path/to/plugin_dir/ha_duckdb.so
 cp duckdb_mariadb_compat.sql /path/to/plugin_dir/duckdb_mariadb_compat.sql
 ```
 
-### 3. Install the plugin
+### 4. Install the plugin
 
 ```sql
 INSTALL PLUGIN duckdb SONAME 'ha_duckdb-<distro>.so';
 ```
 
-### 4. Verify
+### 5. Verify
 
 ```sql
 SELECT ENGINE, SUPPORT, COMMENT FROM information_schema.ENGINES WHERE ENGINE='DUCKDB';

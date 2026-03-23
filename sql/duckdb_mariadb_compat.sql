@@ -13,13 +13,7 @@
 --   * Blank lines are ignored
 
 -- ---------------------------------------------------------------------------
--- TBD
--- ---------------------------------------------------------------------------
--- DATEDIFF
--- CONCAT
--- CONCAT_WS
--- ---------------------------------------------------------------------------
--- General SQL language 
+-- General SQL language
 -- ---------------------------------------------------------------------------
 
 CREATE OR REPLACE MACRO ifnull(a, b) AS coalesce(a, b);
@@ -51,6 +45,10 @@ CREATE OR REPLACE MACRO from_unixtime(n) AS make_timestamp(n::BIGINT * 1000000);
 -- ---------------------------------------------------------------------------
 -- Date arithmetic
 -- ---------------------------------------------------------------------------
+
+-- MariaDB: DATEDIFF(date1, date2)  →  days between date1 and date2
+-- DuckDB's datediff() takes an explicit unit and reversed arg order.
+CREATE OR REPLACE MACRO datediff(d1, d2) AS datediff('day', d2::DATE, d1::DATE);
 
 -- MariaDB: LAST_DAY(date)  →  the last calendar day of that month
 CREATE OR REPLACE MACRO last_day(d) AS
