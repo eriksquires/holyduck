@@ -221,7 +221,9 @@ MariaDB.
 
 You may createn normal MariaDB views via MariaDB and if you follow our guidelines for **Optimizing Queries for HolyDuck** from above you'll reap the same benefits.  On the other hand, if you create DuckDB views in `holyduck_duckdb_extensions.sql` you can take full advantage of DuckDB syntax and features. 
 
-HolyDuck exposes DuckDB views as tables, which is a bit of a lie but so long as you don't accidentally attempt to write to them no errors should occur.
+HolyDuck exposes DuckDB views as tables, which is a bit of a lie but so long as you don't accidentally attempt to write to them no errors should occur.  
+
+To be clear, there is no natural performance benefit from using DuckDB views vs. MariaDB, the benefit of DuckDB views is from the expanded syntax.
 
 ### Views as Language Extensions
 
