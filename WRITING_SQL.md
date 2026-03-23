@@ -7,10 +7,11 @@ The guidance in this document comes from our choice not to re-write a SQL parser
 - How to write SQL which runs
 - Optimizing SQL queries for cross-engine joins
 - Extending HolyDuck with custom features
+- Leveraging views
 
 ## SQL Dialect
 
-It is important to know that **all SQL passes through MariaDB's parser first**. If MariaDB doesn't recognize the syntax or function, it will never reach DuckDB — not even inside a subquery or CTE. This has practical consequences for what you can and cannot write. For function incompatibility, see the *Extending HolyDuck* section below.
+It is important to know that **all SQL passes through MariaDB's parser first**. If MariaDB doesn't recognize the syntax or function, it will never reach DuckDB — not even inside a subquery or CTE. This has practical consequences for what you can and cannot write. For overcoming functional incompatibility, see the **Extending HolyDuck** section below.
 
 ### What MariaDB blocks
 
@@ -122,25 +123,6 @@ Whenever you have a large DuckDB table joining against InnoDB:
 This pattern works for any depth of aggregation — daily buckets, percentiles, window functions,
 `RoundDateTime` time bucketing — as long as the CTE references only DuckDB tables.
 
-### Using Views for BI Tools
-
-BI tools (Tableau, Grafana, Power BI, etc.) generate their own SQL. Even when they do write CTEs,
-they may not structure them in a way that triggers efficient pushdown. The solution is to pre-bake the CTE
-pattern into a MariaDB view, so the tool always gets the right behavior regardless of what SQL it
-generates on top:
-
-```sql
-CREATE VIEW sales_summary AS
-    SELECT category_id, region_id,
-           SUM(amount) AS total_sales,
-           COUNT(*) AS order_count
-    FROM sales
-    GROUP BY category_id, region_id;
-```
-
-The BI tool queries `sales_summary` like a plain table. MariaDB rewrites the query against the
-view definition, `PUSHED DERIVED` fires, and the aggregation runs entirely inside DuckDB.
-The tool gets fast results without any knowledge of the underlying engine.
 
 ---
 
@@ -185,12 +167,12 @@ CREATE OR REPLACE MACRO rounddatetime(dt, bucket_secs) AS
     time_bucket(to_seconds(CAST(bucket_secs AS BIGINT)), dt::TIMESTAMP);
 ```
 
-The problem at this point is that MariaDB won't pass RoundDateTime to DuckDb yet.  It will
+The problem at this point is that MariaDB won't pass RoundDateTime to DuckDB yet.  It will
 see it as a missing or undeclared function.  We get around this by ALSO creating it for
 MariaDB.
 
 The user will have to install these functions per DB when needed, HolyDuck does not
-automatically install them (unlike the DuckDB marcos).
+automatically install them (unlike the DuckDB macros).
 
 `holyduck_mariadb_functions.sql` contains the MariaDB stored function:
 ```sql
@@ -201,13 +183,15 @@ RETURN FROM_UNIXTIME(FLOOR(UNIX_TIMESTAMP(dt) / bucket_secs) * bucket_secs);
 Notice that the definition is slightly different, as the DuckDB macro is optimized
 for DuckDB but they are functionally equivalent.
 
+We'll now go through why and how these two definitions work in different scenarios.
+
 ### Execution of RoundDateTime() in DuckDB
 Query against a DuckDB table:
 ```sql
 SELECT RoundDateTime(ts, 300) FROM duckdb_metrics;
 ```
 MariaDB recognizes `RoundDateTime` via the stored function, which keeps it from throwing a
-SQL error, then then the pushdown fires. DuckDB receives the query and resolves `rounddatetime`
+SQL error, then the pushdown fires. DuckDB receives the query and resolves `rounddatetime`
 against its own macro — `time_bucket()` runs.
 The stored function is never called.
 
@@ -233,6 +217,27 @@ We should point out that dual entries are only needed for NEW functions or featu
 when the issue is DuckDB lacks a function which exists in MariaDB you only need to create a new macro and restart
 MariaDB.
 
-### Views
+## Views
 
-DuckDB expressions which are not functions can't use either of the examples above.  In these cases we suggest creating a view inside DuckDB itself.  This gives you 100% of DuckDB functionality so long as all the data is in DuckDB.  MariaDB will never know the underlying SQL is not valid for it. It will just see the returned rows.  The correct place for these is again in `holyduck_duckdb_extensions.sql`.
+You may create views via MariaDB and if you follow our guidelines for **Optimizing Queries for HolyDuck** from above you'll reap the same benefits.  On the other hand, if you create DuckDB views in `holyduck_duckdb_extensions.sql` you can take full advantage of DuckDB syntax and features. 
+
+### Views as Language Extensions
+DuckDB expressions which are not functions can't use either of the examples above.  In these cases we suggest creating a view inside DuckDB itself.  This gives you 100% of DuckDB functionality so long as all the data is in DuckDB.  MariaDB will never know the underlying SQL is not valid for it. It will just see the returned rows.  
+
+### Views for BI Tools
+
+BI tools (Tableau, Grafana, Power BI, etc.) generate their own SQL. Even when they do write CTEs, they may not structure them in a way that triggers efficient pushdown. The solution is to pre-bake the CTE pattern into a MariaDB view, so the tool always gets the right behavior regardless of what SQL it
+generates on top:
+
+```sql
+CREATE VIEW sales_summary AS
+    SELECT category_id, region_id,
+           SUM(amount) AS total_sales,
+           COUNT(*) AS order_count
+    FROM sales
+    GROUP BY category_id, region_id;
+```
+
+The BI tool queries `sales_summary` like a plain table. MariaDB rewrites the query against the
+view definition, `PUSHED DERIVED` fires, and the aggregation runs entirely inside DuckDB.
+The tool gets fast results without any knowledge of the underlying engine.
