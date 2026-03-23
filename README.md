@@ -98,7 +98,7 @@ cp duckdb_mariadb_compat.sql /path/to/plugin_dir/duckdb_mariadb_compat.sql
 ### 3. Install the plugin
 
 ```sql
-INSTALL PLUGIN duckdb SONAME 'ha_duckdb.so';
+INSTALL PLUGIN duckdb SONAME 'ha_duckdb-<distro>.so';
 ```
 
 ### 4. Verify
