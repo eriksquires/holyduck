@@ -12,6 +12,10 @@
 --   * Single-line comments (--) are supported
 --   * Blank lines are ignored
 
+-- TBD
+-- DATEDIFF
+-- CONCAT
+
 -- ---------------------------------------------------------------------------
 -- General SQL language 
 -- ---------------------------------------------------------------------------
