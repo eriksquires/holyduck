@@ -2,9 +2,9 @@
 
 ## SQL Dialect — MariaDB is the Gatekeeper
 
-The most fundamental thing to understand about HolyDuck: **all SQL passes through MariaDB's
-parser first**. If MariaDB doesn't recognize the syntax, it never reaches DuckDB — not even
-inside a subquery or CTE. This has practical consequences for what you can and cannot write.
+It is improtant to know that **all SQL passes through MariaDB's parser first**. If 
+MariaDB doesn't recognize the syntax, it never reaches DuckDB — not even inside a 
+subquery or CTE. This has practical consequences for what you can and cannot write.
 
 ### What MariaDB blocks
 
@@ -44,13 +44,18 @@ DuckDB does vs MariaDB* — and that's where query structure matters most.
 ---
 
 ## Optimizing Queries for HolyDuck
+Single engine queries will run as you expect, either all in MariaDB or all in DuckDB. 
 
-The most important thing to understand about mixed-engine queries: **MariaDB will push
-WHERE conditions down to DuckDB**, so date filters, range filters, and equality conditions
-on DuckDB columns all execute inside DuckDB before rows are returned. What MariaDB
-*cannot* push down are filters that depend on values from external (non-duck) tables (e.g. `WHERE s.id = c.id`). If your query joins a DuckDB table directly against an InnoDB table and groups the result, MariaDB receives the filtered DuckDB rows and performs the GROUP BY itself. 
+When your query uses tables inside/outside of DuckDB some attention to the query shape
+will yield big performance improvements.  
 
-Fortunately worst case scenarios are rarely existential crisis but we can write SQL in a way that works around this limitation.
+Generally speaking, MariaDB can only push down WHERE conditions which are entirely in one 
+engine or another but filters that depend on values from external (non-duck) tables 
+(e.g. `WHERE s.id = c.id`) won't be.  Instead MariaDB will push down all the filters it can, 
+retrieve the rows and then apply any missing filter conditions.  Honestly this is not deathly
+slow, but also not optimal.  
+
+Fortunately MariaDB with HolyDuck does let us write SQL in a way that works around this bottleneck.
 
 The solution is to restructure the query so the heavy DuckDB work happens in a CTE or
 subquery first — then `PUSHED DERIVED` fires and the entire aggregation runs inside DuckDB,
