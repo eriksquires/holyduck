@@ -112,6 +112,7 @@ JOIN categories c ON ss.category_id = c.id
 JOIN regions r ON ss.region_id = r.id
 ORDER BY ss.total_sales DESC;
 ```
+Think of the CTE as defining the execution boundary: everything inside runs in DuckDB.
 
 What happens: `PUSHED DERIVED` fires on `sales_summary`. DuckDB scans `sales`, applies the
 date filter, aggregates by region_id and category_id and returns one row per (category_id, 
