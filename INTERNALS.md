@@ -4,6 +4,7 @@
 
 ### DDL
 - `CREATE TABLE ... ENGINE=DUCKDB` — creates a shared `#duckdb/global.duckdb` file per database
+- **Table discovery** — DuckDB tables and views are auto-discovered on first query; no `CREATE TABLE` stub needed for DuckDB-native views defined in `holyduck_duckdb_extensions.sql`
 - `DROP TABLE` — removes table from DuckDB
 - `RENAME TABLE` — renames table in DuckDB
 - `TRUNCATE TABLE` — pushed as DuckDB native TRUNCATE

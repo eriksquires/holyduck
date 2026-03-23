@@ -223,25 +223,22 @@ You may create views via MariaDB and if you follow our guidelines for **Optimizi
 
 ### Views as Language Extensions
 
-DuckDB expressions which are not functions can't use either of the macro approaches above. In these cases you can create a view inside DuckDB itself using the full DuckDB SQL dialect, then register a matching table stub in MariaDB so it becomes queryable.
+DuckDB expressions which are not functions can't use either of the macro approaches above. In these cases you can create a view inside DuckDB itself using the full DuckDB SQL dialect — HolyDuck will make it queryable through MariaDB automatically.
 
-HolyDuck uses a naming convention: any table prefixed with `v_` is treated as a view stub — MariaDB registers the name in its catalog but HolyDuck skips creating a real table in DuckDB, leaving the DuckDB view untouched.
-
-**Step 1** — define the view in `holyduck_duckdb_extensions.sql` using the `v_` prefix:
+**Step 1** — define the view in `holyduck_duckdb_extensions.sql`:
 ```sql
 CREATE OR REPLACE VIEW mydb.v_my_view AS
     SELECT id, val * 2 AS double_val FROM mydb.my_table;
 ```
 
-**Step 2** — register a matching stub in MariaDB (see `holyduck_mariadb_tables.sql`):
+**Step 2** — restart MariaDB, then query it directly:
 ```sql
-CREATE TABLE IF NOT EXISTS v_my_view (
-    id         INT,
-    double_val DOUBLE
-) ENGINE=DUCKDB;
+SELECT * FROM v_my_view;
 ```
 
-MariaDB sees a table. DuckDB resolves it against the view. The `v_` prefix ensures HolyDuck never overwrites the view with a real table, regardless of restart order.
+That's it. HolyDuck discovers the view automatically the first time it's queried — no `CREATE TABLE` stub required. To remove it, delete it from `holyduck_duckdb_extensions.sql` and restart; no MariaDB cleanup needed.
+
+The `v_` naming convention is recommended but not required. It signals to readers that the object is a DuckDB-native view rather than a regular table, and it ensures HolyDuck never overwrites an existing view if a `CREATE TABLE v_name ENGINE=DUCKDB` is ever issued manually.
 
 ### Views for BI Tools
 
