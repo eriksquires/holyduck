@@ -8,6 +8,7 @@ data-*/
 
 # Downloaded dependencies (fetch-deps.sh)
 lib/libduckdb.so
+lib/libduckdb.so*
 lib/duckdb.hpp
 lib/duckdb.h
 
