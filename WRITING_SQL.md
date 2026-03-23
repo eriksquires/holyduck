@@ -1,10 +1,16 @@
 # Writing SQL with HolyDuck
 
-## SQL Dialect — MariaDB is the Gatekeeper
+## Introduction
 
-It is important to know that **all SQL passes through MariaDB's parser first**. If
-MariaDB doesn't recognize the syntax or function, it will never reach DuckDB — not even inside a
-subquery or CTE. This has practical consequences for what you can and cannot write. For function incompatibility, see the *Extending HolyDuck* section below.
+The guidance in this document comes from our choice not to re-write a SQL parser or cost-based optimizer.   For our use cases we felt we could achieve our major goals with macros and a little manual SQL re-writing.  Here we'll discuss:
+
+- How to write SQL which runs
+- Optimizing SQL queries for cross-engine joins
+- Extending HolyDuck with custom features
+
+## SQL Dialect
+
+It is important to know that **all SQL passes through MariaDB's parser first**. If MariaDB doesn't recognize the syntax or function, it will never reach DuckDB — not even inside a subquery or CTE. This has practical consequences for what you can and cannot write. For function incompatibility, see the *Extending HolyDuck* section below.
 
 ### What MariaDB blocks
 
@@ -20,29 +26,12 @@ We'll cover working around these limitations below in **Extending HolyDuck.**
 
 ### What gets through
 
-Any SQL that is valid MariaDB syntax will reach DuckDB, whether or not DuckDB can parse it.  
-
-### Who wins on ambiguous syntax
-
-Where both engines accept the same syntax but behave differently, MariaDB evaluates
-non-pushed expressions and DuckDB evaluates pushed ones. The compatibility macros exist
-precisely to bridge these gaps so the pushed-down SQL means the same thing in DuckDB
-as it would have in MariaDB.
-
-### The practical rule
-
-Write SQL that MariaDB accepts. Use the compatibility macros for MariaDB-specific functions.
-For anything DuckDB-specific that MariaDB blocks, there is no workaround within HolyDuck —
-the parser is the hard boundary.
-
-That said, within valid MariaDB SQL there is still a lot of room to influence *how much work
-DuckDB does vs MariaDB* — and that's where query structure matters most.
+SQL that is valid MariaDB syntax and verbs will reach DuckDB, whether or not DuckDB can execute it or not.  DuckDB may then throw an error. 
 
 ---
 
 ## Optimizing Queries for HolyDuck
-When your query uses tables which are both in and out of DuckDB some attention to the query shape
-will yield big performance improvements.
+When your query uses tables which are both in and out of DuckDB some attention to the query shape will yield big performance improvements.
 
 Single engine queries will run as you expect, either all in MariaDB or all in DuckDB.
 
@@ -52,7 +41,7 @@ engine or another but filters that depend on values from external (non-duck) tab
 retrieve the rows and then apply any missing filter conditions.  Honestly this is not deathly
 slow, but also not optimal.
 
-Fortunately MariaDB with HolyDuck does let us write SQL in a way that works around this bottleneck.
+Fortunately we _can_ write SQL in a way that works around this bottleneck.
 
 The solution is to restructure the query so the heavy DuckDB work happens in a CTE or
 subquery first — then `PUSHED DERIVED` fires and the entire aggregation runs inside DuckDB,
@@ -159,7 +148,7 @@ The tool gets fast results without any knowledge of the underlying engine.
 
 HolyDuck can be extended by editing `holyduck_duckdb_extensions.sql`.  This file runs when MariaDB starts and runs it directly in DuckDB, so any SQL that runs in DuckDB will work here, which includes macros and view creation.
 
-### Translation
+### Function Translation - MariaDB to DuckDB
 
 Where possible we put functions which are common and MariaDB specific here as a translation layer, allowing DuckDB to emulate MariaDB functions in `holyduck_duckdb_extensions.sql` which includes functions such as:
 
@@ -169,9 +158,9 @@ Where possible we put functions which are common and MariaDB specific here as a 
 - `RoundDateTime` (OK, this isn't a standard function but it should be)
 - etc.
 
-### Custom Functions — The Dual Implementation Pattern
+### Function Pass Through - DuckDB to MariaDB
 
-In addition to giving DuckDB some MariaDB functions we also sometimes need to be able to call DuckDB functions which have no equivalent in MariaDB. The problem is that MariaDB's parser must recognize every function name in a query before pushdown decisions are made.  If MariaDB doesn't know the function, the query will be rejected before it ever reaches DuckDB.
+In addition to giving DuckDB some MariaDB functions we also sometimes need to be able to call DuckDB functions which have no equivalent in MariaDB. The problem is that MariaDB's parser will reject any unknown function before the SQL is pushed down to DuckDB.
 
 The solution is a **dual implementation** across both engines.  For DuckDB we provide a convenience .sql file:
 
@@ -183,7 +172,7 @@ To make MariaDB aware of DuckDB functions we provide sample SQL in:
 **`sql/holyduck_mariadb_functions.sql`** — installed by the user into each MariaDB database.
 MariaDB sees this. It satisfies the parser and provides a fallback for non-DuckDB tables.
 
-### Example: RoundDateTime Setup
+### RoundDateTime()
 
 We do a lot of time series analysis and downsampling of metrics so we use a function RoundDateTime()
 that takes arbitrary seconds size buckets to round down to such as 60, 300, 600, etc. We'll use it
@@ -212,7 +201,7 @@ RETURN FROM_UNIXTIME(FLOOR(UNIX_TIMESTAMP(dt) / bucket_secs) * bucket_secs);
 Notice that the definition is slightly different, as the DuckDB macro is optimized
 for DuckDB but they are functionally equivalent.
 
-### Example 1: RoundDateTime() in DuckDB
+### Execution of RoundDateTime() in DuckDB
 Query against a DuckDB table:
 ```sql
 SELECT RoundDateTime(ts, 300) FROM duckdb_metrics;
@@ -222,7 +211,7 @@ SQL error, then then the pushdown fires. DuckDB receives the query and resolves 
 against its own macro — `time_bucket()` runs.
 The stored function is never called.
 
-### Example 2: RoundDateTime in InnoDB
+### Execution of RoundDateTime() in InnoDB
 
 ```sql
 SELECT RoundDateTime(ts, 300) FROM innodb_events;
