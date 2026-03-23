@@ -234,7 +234,13 @@ CREATE OR REPLACE VIEW mydb.v_my_view AS
     SELECT id, val * 2 AS double_val FROM mydb.my_table;
 ```
 
-**Step 2** — restart MariaDB. That's it, v_my_view is now usable from MariaDB. MariaDB will discover the view automatically the first time it's queried. To remove it, delete it from `holyduck_duckdb_extensions.sql` and restart; no MariaDB cleanup needed.
+**Step 2** — restart MariaDB. That's it, `v_my_view` is now usable from MariaDB. HolyDuck discovers the view automatically the first time it's queried.
+
+To remove a view, delete it from `holyduck_duckdb_extensions.sql` and add a `DROP VIEW IF EXISTS` so it's removed from DuckDB on the next restart:
+```sql
+DROP VIEW IF EXISTS mydb.v_my_view;
+```
+Once you've restarted and confirmed it's gone, remove the DROP line too.
 
 ### Views for BI Tools
 
