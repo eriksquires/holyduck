@@ -4,7 +4,7 @@
 
 It is important to know that **all SQL passes through MariaDB's parser first**. If
 MariaDB doesn't recognize the syntax or function, it will never reach DuckDB — not even inside a
-subquery or CTE. This has practical consequences for what you can and cannot write. For function incompatibility, see the MariaDB Function Compatibility section below.
+subquery or CTE. This has practical consequences for what you can and cannot write. For function incompatibility, see the *Extending with Custom Functions* section below.
 
 ### What MariaDB blocks
 
@@ -157,6 +157,49 @@ The tool gets fast results without any knowledge of the underlying engine.
 
 ---
 
+## Extending with Custom Functions — The Dual Implementation Pattern
+
+MariaDB's parser must recognize every function name in a query before pushdown decisions are made.
+This means a DuckDB macro alone is not enough — if MariaDB doesn't know the function, the query
+is rejected before it ever reaches DuckDB.
+
+The solution is a **dual implementation**:
+
+1. **DuckDB macro** — implements the function using DuckDB-native logic; runs when the query is
+   pushed down to DuckDB.
+2. **MariaDB stored function** — satisfies the parser and provides a portable fallback using
+   standard MariaDB SQL; runs when the query is not pushed down (e.g., on InnoDB tables).
+
+`RoundDateTime` is the canonical example. The DuckDB macro uses `time_bucket()` for efficient
+vectorised time bucketing. The MariaDB stored function uses unix timestamp arithmetic that works
+on any table:
+
+```sql
+-- MariaDB stored function (install once per database):
+CREATE FUNCTION RoundDateTime(dt DATETIME, bucket_secs INT)
+RETURNS DATETIME DETERMINISTIC
+RETURN FROM_UNIXTIME(FLOOR(UNIX_TIMESTAMP(dt) / bucket_secs) * bucket_secs);
+```
+
+With both in place:
+- `SELECT RoundDateTime(ts, 300) FROM duckdb_table` — PUSHED SELECT fires, DuckDB macro runs (fast)
+- `SELECT RoundDateTime(ts, 300) FROM innodb_table` — MariaDB stored function runs (correct)
+
+This pattern works for any function that has equivalent logic in both engines. If a correct
+MariaDB fallback is not feasible, the stored function can instead raise an explicit error with
+`SIGNAL SQLSTATE '45000'` rather than returning silently wrong results.
+
+HolyDuck ships a ready-to-run script for all supported MariaDB stored functions:
+
+```bash
+mariadb -uroot -p mydb < $(mysql -uroot -p -se "SELECT @@plugin_dir")/holyduck_mariadb_functions.sql
+```
+
+The file `sql/holyduck_mariadb_functions.sql` uses `CREATE FUNCTION IF NOT EXISTS` so it is safe
+to re-run after upgrades.
+
+---
+
 ## Feature Status
 
 ### DDL
@@ -207,47 +250,6 @@ Macros installed into DuckDB at startup translate MariaDB function names:
 - `<cache>(expr)` wrappers from MariaDB's AST printer stripped automatically
 
 Macros live in `sql/duckdb_mariadb_compat.sql` — edit and redeploy without recompiling.
-
-### Extending with Custom Functions — The Dual Implementation Pattern
-
-MariaDB's parser must recognize every function name in a query before pushdown decisions are made.
-This means a DuckDB macro alone is not enough — if MariaDB doesn't know the function, the query
-is rejected before it ever reaches DuckDB.
-
-The solution is a **dual implementation**:
-
-1. **DuckDB macro** — implements the function using DuckDB-native logic; runs when the query is
-   pushed down to DuckDB.
-2. **MariaDB stored function** — satisfies the parser and provides a portable fallback using
-   standard MariaDB SQL; runs when the query is not pushed down (e.g., on InnoDB tables).
-
-`RoundDateTime` is the canonical example. The DuckDB macro uses `time_bucket()` for efficient
-vectorised time bucketing. The MariaDB stored function uses unix timestamp arithmetic that works
-on any table:
-
-```sql
--- MariaDB stored function (install once):
-CREATE FUNCTION RoundDateTime(dt DATETIME, bucket_secs INT)
-RETURNS DATETIME DETERMINISTIC
-RETURN FROM_UNIXTIME(FLOOR(UNIX_TIMESTAMP(dt) / bucket_secs) * bucket_secs);
-```
-
-With both in place:
-- `SELECT RoundDateTime(ts, 300) FROM duckdb_table` — PUSHED SELECT fires, DuckDB macro runs (fast)
-- `SELECT RoundDateTime(ts, 300) FROM innodb_table` — MariaDB stored function runs (correct)
-
-This pattern works for any function that has equivalent logic in both engines. If a correct
-MariaDB fallback is not feasible, the stored function can instead raise an explicit error with
-`SIGNAL SQLSTATE '45000'` rather than returning silently wrong results.
-
-HolyDuck ships a ready-to-run script for all supported MariaDB stored functions:
-
-```bash
-mariadb -uroot -p mydb < $(mysql -uroot -p -se "SELECT @@plugin_dir")/holyduck_mariadb_functions.sql
-```
-
-The file `sql/holyduck_mariadb_functions.sql` uses `CREATE FUNCTION IF NOT EXISTS` so it is safe
-to re-run after upgrades.
 
 ### Data Type Support
 | MariaDB Type | DuckDB Type |
