@@ -150,7 +150,7 @@ HolyDuck can be extended by editing `holyduck_duckdb_extensions.sql`.  This file
 
 ### Function Translation - MariaDB to DuckDB
 
-Where possible we put functions which are common and MariaDB specific here as a translation layer, allowing DuckDB to emulate MariaDB functions in `holyduck_duckdb_extensions.sql` which includes functions such as:
+Where possible we put common MariaDB functions which don't exist in DuckDB in `holyduck_duckdb_extensions.sql` which includes functions such as:
 
 - `DATE_FORMAT`
 -  `IFNULL`
@@ -235,4 +235,4 @@ MariaDB.
 
 ### Views
 
-Some queries are too complicated to translate with just a macro expansion.  In these cases we suggest creating a view inside DuckDB itself.  This gives you 100% of DuckDB functionality so long as all the data is in DuckDB.  MariaDB will never know the underlying SQL is not valid for it. It will just see the returned rows.
+DuckDB expressions which are not functions can't use either of the examples above.  In these cases we suggest creating a view inside DuckDB itself.  This gives you 100% of DuckDB functionality so long as all the data is in DuckDB.  MariaDB will never know the underlying SQL is not valid for it. It will just see the returned rows.  The correct place for these is again in `holyduck_duckdb_extensions.sql`.
