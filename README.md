@@ -50,9 +50,7 @@ MariaDB's ColumnStore is the official MariaDB analytical storage engine in this 
 | High availability         | None — local file only            | MariaDB replication + clustering     |
 | Multi-server              | Single node                       | Distributed across nodes             |
 | Deployment                | Drop in a `.so` file              | Full cluster infrastructure          |
-| Query speed (single node) | DuckDB — extremely fast           | Fast, but more overhead              |
 | Setup complexity          | Minutes                           | Hours to days                        |
-| ETL tooling               | Standard SQL                      | Bulk loaders, S3, enterprise tooling |
 
 **HolyDuck's sweet spot:** single-node analytics alongside InnoDB. Big overnight ETL jobs, exploratory data analysis during the day, million-to-billion row scans that return small aggregated results — all without standing up any infrastructure.
 
