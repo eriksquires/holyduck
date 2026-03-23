@@ -135,6 +135,26 @@ Whenever you have a large DuckDB table joining against InnoDB:
 This pattern works for any depth of aggregation — daily buckets, percentiles, window functions,
 `RoundDateTime` time bucketing — as long as the CTE references only DuckDB tables.
 
+### Using Views for BI Tools
+
+BI tools (Tableau, Grafana, Power BI, etc.) generate their own SQL. Even when they do write CTEs,
+they may not structure them in a way that triggers efficient pushdown. The solution is to pre-bake the CTE
+pattern into a MariaDB view, so the tool always gets the right behavior regardless of what SQL it
+generates on top:
+
+```sql
+CREATE VIEW sales_summary AS
+    SELECT category_id, region_id,
+           SUM(amount) AS total_sales,
+           COUNT(*) AS order_count
+    FROM sales
+    GROUP BY category_id, region_id;
+```
+
+The BI tool queries `sales_summary` like a plain table. MariaDB rewrites the query against the
+view definition, `PUSHED DERIVED` fires, and the aggregation runs entirely inside DuckDB.
+The tool gets fast results without any knowledge of the underlying engine.
+
 ---
 
 ## Feature Status
