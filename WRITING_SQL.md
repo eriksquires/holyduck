@@ -4,14 +4,14 @@
 
 The guidance in this document comes from our choice not to re-write a SQL parser or cost-based optimizer.   For our use cases we felt we could achieve our major goals with macros and a little manual SQL re-writing.  Here we'll discuss:
 
-- How to write SQL which runs
+- How to write SQL which doesn't fail
 - Optimizing SQL queries for cross-engine joins
 - Extending HolyDuck with custom features
 - Leveraging views
 
 ## SQL Dialect
 
-It is important to know that **all SQL passes through MariaDB's parser first**. If MariaDB doesn't recognize the syntax or function, it will never reach DuckDB — not even inside a subquery or CTE. This has practical consequences for what you can and cannot write. For overcoming functional incompatibility, see the **Extending HolyDuck** section below.
+**All SQL passes through MariaDB's parser first**. If MariaDB doesn't recognize the syntax or function, it will never reach DuckDB — not even inside a subquery or CTE. This has practical consequences for what you can and cannot write. For overcoming functional incompatibility, see the **Extending HolyDuck** section below.
 
 ### What MariaDB blocks
 
@@ -192,8 +192,7 @@ SELECT RoundDateTime(ts, 300) FROM duckdb_metrics;
 ```
 MariaDB recognizes `RoundDateTime` via the stored function, which keeps it from throwing a
 SQL error, then the pushdown fires. DuckDB receives the query and resolves `rounddatetime`
-against its own macro — `time_bucket()` runs.
-The stored function is never called.
+against its own macro — `time_bucket()` runs. The stored function is never called.
 
 ### Execution of RoundDateTime() in InnoDB
 
@@ -219,7 +218,7 @@ MariaDB.
 
 ## Views
 
-You may createn normal MariaDB views via MariaDB and if you follow our guidelines for **Optimizing Queries for HolyDuck** from above you'll reap the same benefits.  On the other hand, if you create DuckDB views in `holyduck_duckdb_extensions.sql` you can take full advantage of DuckDB syntax and features. 
+You may create normal MariaDB views via MariaDB and if you follow our guidelines for **Optimizing Queries for HolyDuck** from above you'll reap the same benefits.  On the other hand, if you create DuckDB views in `holyduck_duckdb_extensions.sql` you can take full advantage of DuckDB syntax and features. 
 
 HolyDuck exposes DuckDB views as tables, which is a bit of a lie but so long as you don't accidentally attempt to write to them no errors should occur.  
 
@@ -235,14 +234,7 @@ CREATE OR REPLACE VIEW mydb.v_my_view AS
     SELECT id, val * 2 AS double_val FROM mydb.my_table;
 ```
 
-**Step 2** — restart MariaDB, then query it directly:
-```sql
-SELECT * FROM v_my_view;
-```
-
-That's it. HolyDuck discovers the view automatically the first time it's queried — no `CREATE TABLE` stub required. To remove it, delete it from `holyduck_duckdb_extensions.sql` and restart; no MariaDB cleanup needed.
-
-The `v_` naming convention is recommended but not required. It signals to readers that the object is a DuckDB-native view rather than a regular table, and it ensures HolyDuck never overwrites an existing view if a `CREATE TABLE v_name ENGINE=DUCKDB` is ever issued manually.
+**Step 2** — restart MariaDB. That's it, v_my_view is now usable from MariaDB. MariaDB will discover the view automatically the first time it's queried. To remove it, delete it from `holyduck_duckdb_extensions.sql` and restart; no MariaDB cleanup needed.
 
 ### Views for BI Tools
 
