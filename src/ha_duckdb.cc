@@ -470,6 +470,13 @@ int ha_duckdb::create(const char *name, TABLE *table_arg,
   duckdb_table_name= p.qualified_table;
   db_name=           p.db_name;
 
+  // Tables prefixed with "v_" are view stubs — MariaDB registers the name
+  // in its catalog but DuckDB already has the view defined in
+  // holyduck_duckdb_extensions.sql. Skip DuckDB CREATE TABLE so the view
+  // is not overwritten with an empty base table.
+  if (p.table_name.substr(0, 2) == "v_")
+    DBUG_RETURN(0);
+
   if (ensure_duckdb_dir())
     DBUG_RETURN(1);
 

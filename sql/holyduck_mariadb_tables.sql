@@ -10,6 +10,8 @@
 -- Install once per database:
 --   mariadb -uroot -p mydb < holyduck_mariadb_tables.sql
 --
+-- Naming convention: prefix view stubs with "v_". HolyDuck skips DuckDB
+-- table creation for any table named v_*, leaving the DuckDB view intact.
 -- Column definitions must match the view's output columns and types.
 --
 
@@ -17,11 +19,11 @@
 -- Example: a DuckDB view registered as a MariaDB table stub
 --
 -- Corresponding view in holyduck_duckdb_extensions.sql:
---   CREATE OR REPLACE VIEW mydb.my_view AS
+--   CREATE OR REPLACE VIEW mydb.v_my_view AS
 --       SELECT id, val * 2 AS double_val FROM mydb.my_table;
 --
--- CREATE TABLE IF NOT EXISTS my_view (
---     id        INT,
+-- CREATE TABLE IF NOT EXISTS v_my_view (
+--     id         INT,
 --     double_val DOUBLE
 -- ) ENGINE=DUCKDB;
 -- ---------------------------------------------------------------------------

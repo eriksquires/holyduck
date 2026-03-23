@@ -225,21 +225,23 @@ You may create views via MariaDB and if you follow our guidelines for **Optimizi
 
 DuckDB expressions which are not functions can't use either of the macro approaches above. In these cases you can create a view inside DuckDB itself using the full DuckDB SQL dialect, then register a matching table stub in MariaDB so it becomes queryable.
 
-**Step 1** — define the view in `holyduck_duckdb_extensions.sql`:
+HolyDuck uses a naming convention: any table prefixed with `v_` is treated as a view stub — MariaDB registers the name in its catalog but HolyDuck skips creating a real table in DuckDB, leaving the DuckDB view untouched.
+
+**Step 1** — define the view in `holyduck_duckdb_extensions.sql` using the `v_` prefix:
 ```sql
-CREATE OR REPLACE VIEW mydb.my_view AS
+CREATE OR REPLACE VIEW mydb.v_my_view AS
     SELECT id, val * 2 AS double_val FROM mydb.my_table;
 ```
 
 **Step 2** — register a matching stub in MariaDB (see `holyduck_mariadb_tables.sql`):
 ```sql
-CREATE TABLE IF NOT EXISTS my_view (
+CREATE TABLE IF NOT EXISTS v_my_view (
     id         INT,
     double_val DOUBLE
 ) ENGINE=DUCKDB;
 ```
 
-MariaDB sees a table. DuckDB resolves it against the view. MariaDB never sees the underlying DuckDB SQL.
+MariaDB sees a table. DuckDB resolves it against the view. The `v_` prefix ensures HolyDuck never overwrites the view with a real table, regardless of restart order.
 
 ### Views for BI Tools
 

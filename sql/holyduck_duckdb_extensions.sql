@@ -119,4 +119,3 @@ CREATE OR REPLACE MACRO rounddatetime(dt, bucket_secs) AS
 
 -- MariaDB: IF(condition, true_val, false_val)
 CREATE OR REPLACE MACRO if(cond, a, b) AS CASE WHEN cond THEN a ELSE b END;
-
