@@ -166,8 +166,9 @@ databases — stop MariaDB first, do the work with any DuckDB client, then bring
 │   ├── ha_duckdb.h               # Header
 │   └── CMakeLists.txt            # Standalone cmake build
 ├── sql/
-│   ├── holyduck_duckdb_extensions.sql       # DuckDB extensions, macros, and views (loaded into DuckDB at startup)
-│   └── holyduck_mariadb_functions.sql  # MariaDB stored functions (install once per database)
+│   ├── holyduck_duckdb_extensions.sql   # DuckDB extensions, macros, and views (loaded into DuckDB at startup)
+│   ├── holyduck_mariadb_functions.sql   # MariaDB stored functions (install once per database)
+│   └── holyduck_mariadb_tables.sql      # MariaDB table stubs for DuckDB-native views (install once per database)
 ├── docker/
 │   ├── base-ubuntu.dockerfile
 │   ├── base-oracle8.dockerfile

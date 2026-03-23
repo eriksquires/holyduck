@@ -222,7 +222,24 @@ MariaDB.
 You may create views via MariaDB and if you follow our guidelines for **Optimizing Queries for HolyDuck** from above you'll reap the same benefits.  On the other hand, if you create DuckDB views in `holyduck_duckdb_extensions.sql` you can take full advantage of DuckDB syntax and features. 
 
 ### Views as Language Extensions
-DuckDB expressions which are not functions can't use either of the examples above.  In these cases we suggest creating a view inside DuckDB itself.  This gives you 100% of DuckDB functionality so long as all the data is in DuckDB.  MariaDB will never know the underlying SQL is not valid for it. It will just see the returned rows.  
+
+DuckDB expressions which are not functions can't use either of the macro approaches above. In these cases you can create a view inside DuckDB itself using the full DuckDB SQL dialect, then register a matching table stub in MariaDB so it becomes queryable.
+
+**Step 1** — define the view in `holyduck_duckdb_extensions.sql`:
+```sql
+CREATE OR REPLACE VIEW mydb.my_view AS
+    SELECT id, val * 2 AS double_val FROM mydb.my_table;
+```
+
+**Step 2** — register a matching stub in MariaDB (see `holyduck_mariadb_tables.sql`):
+```sql
+CREATE TABLE IF NOT EXISTS my_view (
+    id         INT,
+    double_val DOUBLE
+) ENGINE=DUCKDB;
+```
+
+MariaDB sees a table. DuckDB resolves it against the view. MariaDB never sees the underlying DuckDB SQL.
 
 ### Views for BI Tools
 
