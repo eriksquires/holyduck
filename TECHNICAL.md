@@ -2,9 +2,9 @@
 
 ## SQL Dialect — MariaDB is the Gatekeeper
 
-It is improtant to know that **all SQL passes through MariaDB's parser first**. If 
-MariaDB doesn't recognize the syntax or function it will never reaches DuckDB — not even inside a 
-subquery or CTE. This has practical consequences for what you can and cannot write. 
+It is important to know that **all SQL passes through MariaDB's parser first**. If
+MariaDB doesn't recognize the syntax or function, it will never reach DuckDB — not even inside a
+subquery or CTE. This has practical consequences for what you can and cannot write. For function incompatibility, see the MariaDB Function Compatibility section below.
 
 ### What MariaDB blocks
 
@@ -243,7 +243,7 @@ MariaDB fallback is not feasible, the stored function can instead raise an expli
 HolyDuck ships a ready-to-run script for all supported MariaDB stored functions:
 
 ```bash
-mariadb -uroot -p < /path/to/plugin_dir/holyduck_mariadb_functions.sql
+mariadb -uroot -p mydb < $(mysql -uroot -p -se "SELECT @@plugin_dir")/holyduck_mariadb_functions.sql
 ```
 
 The file `sql/holyduck_mariadb_functions.sql` uses `CREATE FUNCTION IF NOT EXISTS` so it is safe
@@ -365,7 +365,8 @@ databases — stop MariaDB first, do the work with any DuckDB client, then bring
 │   ├── ha_duckdb.h               # Header
 │   └── CMakeLists.txt            # Standalone cmake build
 ├── sql/
-│   └── duckdb_mariadb_compat.sql # MariaDB→DuckDB function macros
+│   ├── duckdb_mariadb_compat.sql       # MariaDB→DuckDB function macros (loaded into DuckDB at startup)
+│   └── holyduck_mariadb_functions.sql  # MariaDB stored functions (install once per database)
 ├── docker/
 │   ├── base-ubuntu.dockerfile
 │   ├── base-oracle8.dockerfile
