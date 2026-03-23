@@ -293,6 +293,37 @@ The safe pattern is: add new column → populate it → drop old column → rena
 
 ---
 
+## Data File Location and Backups
+
+All DuckDB tables across all MariaDB databases are stored in a single file:
+
+```
+<datadir>/#duckdb/global.duckdb
+```
+
+Typically `/var/lib/mysql/#duckdb/global.duckdb`. Confirm your datadir with `SELECT @@datadir`.
+
+The recommended backup approach is a cold copy — stop MariaDB, copy the file, restart:
+
+```bash
+systemctl stop mariadb
+cp /var/lib/mysql/#duckdb/global.duckdb /backups/global.duckdb.$(date +%Y%m%d)
+systemctl start mariadb
+```
+
+### Direct access via DuckDB clients
+
+Because `global.duckdb` is a standard DuckDB database file, any DuckDB client can open it
+directly in read-only mode while MariaDB is running. This can be handy for exploratory analysis
+but is potentially messy — you now have two control planes accessing the same data, which requires
+care around coordination. Read-only mode is required; MariaDB holds the write lock.
+
+For administrative work — bulk loads, schema changes, repairs, or copying data between DuckDB
+databases — stop MariaDB first, do the work with any DuckDB client, then bring MariaDB back up.
+
+
+---
+
 ## Known Limitations
 
 | Area | Status |

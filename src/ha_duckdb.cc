@@ -192,8 +192,8 @@ static void registry_release(const std::string &path)
 // Path helpers
 //
 // MariaDB passes `name` as  <datadir><db>/<table>  (no extension).
-// We store one DuckDB file per MariaDB database at
-//   <datadir>#duckdb/<db>.duckdb
+// We store all DuckDB tables in one global file:
+//   <datadir>#duckdb/global.duckdb
 // Tables inside are schema-qualified as  <db>.<table>.
 // ---------------------------------------------------------------------------
 
