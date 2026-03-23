@@ -118,21 +118,11 @@ date filter, aggregates by region_id and category_id and returns one row per (ca
 region_id) pair — perhaps 50 rows for 5 categories × 10 regions. MariaDB then joins those 
 50 rows against the small InnoDB tables.
 
-Verify with EXPLAIN:
+When you explain your queries look for `select_type: PUSHED DERIVED` — that confirms DuckDB is doing the work.
 
-```sql
-EXPLAIN WITH sales_summary AS (
-    SELECT category_id, region_id, SUM(amount) AS total_sales, COUNT(*) AS order_count
-    FROM sales WHERE ts BETWEEN '2026-01-01' AND '2026-03-31'
-    GROUP BY category_id, region_id
-)
-SELECT c.name, r.name, ss.total_sales
-FROM sales_summary ss
-JOIN categories c ON ss.category_id = c.id
-JOIN regions r ON ss.region_id = r.id\G
-```
-
-Look for `select_type: PUSHED DERIVED` — that confirms DuckDB is doing the work.
+Honestly though, often you won't even feel this pain, so we suggest waiting until you feel it before you optimize. 
+In our testing, even when DuckDB brougth back half a million rows performance was still usable.  Say 4 seconds vs.
+under 1.  I mean, yes, faster is good, but don't derail your train of thought until you have to. 
 
 ### The General Rule
 
