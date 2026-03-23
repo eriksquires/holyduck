@@ -91,9 +91,25 @@ CREATE OR REPLACE MACRO find_in_set(needle, lst) AS
 -- Time bucketing
 -- ---------------------------------------------------------------------------
 
--- MariaDB UDF: RoundDateTime(datetime, bucket_size_in_seconds)
+-- RoundDateTime(datetime, bucket_size_in_seconds)
 -- Truncates a timestamp to the nearest multiple of bucket_size seconds.
 -- Wraps DuckDB's native time_bucket() function.
+--
+-- This is an example of the dual implementation pattern:
+--   1. A DuckDB macro implements the real logic using time_bucket() (runs when pushed down).
+--   2. A MariaDB stored function provides the same semantics using unix timestamp math,
+--      so RoundDateTime works on ANY table — DuckDB or InnoDB.
+--
+-- On DuckDB tables: PUSHED SELECT fires and the DuckDB macro runs (vectorised, fast).
+-- On InnoDB tables: MariaDB calls the stored function directly (correct result, portable math).
+--
+-- To install the MariaDB stored function, run the block below once in MariaDB:
+--
+--   CREATE FUNCTION RoundDateTime(dt DATETIME, bucket_secs INT)
+--   RETURNS DATETIME DETERMINISTIC
+--   RETURN FROM_UNIXTIME(FLOOR(UNIX_TIMESTAMP(dt) / bucket_secs) * bucket_secs);
+--
+-- The DuckDB macro below is installed automatically at plugin startup:
 CREATE OR REPLACE MACRO rounddatetime(dt, bucket_secs) AS
     time_bucket(to_seconds(CAST(bucket_secs AS BIGINT)), dt::TIMESTAMP);
 

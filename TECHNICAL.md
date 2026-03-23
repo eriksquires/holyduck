@@ -1,5 +1,48 @@
 # MariaDB DuckDB Storage Engine — Technical Reference
 
+## SQL Dialect — MariaDB is the Gatekeeper
+
+The most fundamental thing to understand about HolyDuck: **all SQL passes through MariaDB's
+parser first**. If MariaDB doesn't recognize the syntax, it never reaches DuckDB — not even
+inside a subquery or CTE. This has practical consequences for what you can and cannot write.
+
+### What MariaDB blocks
+
+DuckDB has powerful SQL extensions that MariaDB's parser will reject outright:
+
+- `SELECT * EXCLUDE (col)` — MariaDB doesn't know `EXCLUDE`
+- `PIVOT` / `UNPIVOT` — not in MariaDB's grammar
+- `QUALIFY` clause (window function filtering) — MariaDB doesn't know it
+- DuckDB column types in DDL: `LIST`, `STRUCT`, `MAP` — MariaDB won't parse them
+- `SELECT * REPLACE (expr AS col)` — DuckDB extension, unknown to MariaDB
+
+Wrapping these in a subquery does not help — the parser rejects them before pushdown
+decisions are made.
+
+### What gets through
+
+Any SQL that is valid MariaDB syntax will reach DuckDB. This includes standard SQL that
+both engines understand, plus anything bridged by the compatibility macros in
+`duckdb_mariadb_compat.sql` — `DATE_FORMAT`, `IFNULL`, `DATEDIFF`, `RoundDateTime`, etc.
+
+### Who wins on ambiguous syntax
+
+Where both engines accept the same syntax but behave differently, MariaDB evaluates
+non-pushed expressions and DuckDB evaluates pushed ones. The compatibility macros exist
+precisely to bridge these gaps so the pushed-down SQL means the same thing in DuckDB
+as it would have in MariaDB.
+
+### The practical rule
+
+Write SQL that MariaDB accepts. Use the compatibility macros for MariaDB-specific functions.
+For anything DuckDB-specific that MariaDB blocks, there is no workaround within HolyDuck —
+the parser is the hard boundary.
+
+That said, within valid MariaDB SQL there is still a lot of room to influence *how much work
+DuckDB does vs MariaDB* — and that's where query structure matters most.
+
+---
+
 ## Optimizing Queries for HolyDuck
 
 The most important thing to understand about mixed-engine queries: **MariaDB will push
@@ -144,6 +187,47 @@ Macros installed into DuckDB at startup translate MariaDB function names:
 - `<cache>(expr)` wrappers from MariaDB's AST printer stripped automatically
 
 Macros live in `sql/duckdb_mariadb_compat.sql` — edit and redeploy without recompiling.
+
+### Extending with Custom Functions — The Dual Implementation Pattern
+
+MariaDB's parser must recognize every function name in a query before pushdown decisions are made.
+This means a DuckDB macro alone is not enough — if MariaDB doesn't know the function, the query
+is rejected before it ever reaches DuckDB.
+
+The solution is a **dual implementation**:
+
+1. **DuckDB macro** — implements the function using DuckDB-native logic; runs when the query is
+   pushed down to DuckDB.
+2. **MariaDB stored function** — satisfies the parser and provides a portable fallback using
+   standard MariaDB SQL; runs when the query is not pushed down (e.g., on InnoDB tables).
+
+`RoundDateTime` is the canonical example. The DuckDB macro uses `time_bucket()` for efficient
+vectorised time bucketing. The MariaDB stored function uses unix timestamp arithmetic that works
+on any table:
+
+```sql
+-- MariaDB stored function (install once):
+CREATE FUNCTION RoundDateTime(dt DATETIME, bucket_secs INT)
+RETURNS DATETIME DETERMINISTIC
+RETURN FROM_UNIXTIME(FLOOR(UNIX_TIMESTAMP(dt) / bucket_secs) * bucket_secs);
+```
+
+With both in place:
+- `SELECT RoundDateTime(ts, 300) FROM duckdb_table` — PUSHED SELECT fires, DuckDB macro runs (fast)
+- `SELECT RoundDateTime(ts, 300) FROM innodb_table` — MariaDB stored function runs (correct)
+
+This pattern works for any function that has equivalent logic in both engines. If a correct
+MariaDB fallback is not feasible, the stored function can instead raise an explicit error with
+`SIGNAL SQLSTATE '45000'` rather than returning silently wrong results.
+
+HolyDuck ships a ready-to-run script for all supported MariaDB stored functions:
+
+```bash
+mariadb -uroot -p < /path/to/plugin_dir/holyduck_mariadb_functions.sql
+```
+
+The file `sql/holyduck_mariadb_functions.sql` uses `CREATE FUNCTION IF NOT EXISTS` so it is safe
+to re-run after upgrades.
 
 ### Data Type Support
 | MariaDB Type | DuckDB Type |
