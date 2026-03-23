@@ -114,8 +114,9 @@ ORDER BY ss.total_sales DESC;
 ```
 
 What happens: `PUSHED DERIVED` fires on `sales_summary`. DuckDB scans `sales`, applies the
-date filter, and returns one row per (category_id, region_id) pair — perhaps 50 rows for
-5 categories × 10 regions. MariaDB joins those 50 rows against the small InnoDB tables.
+date filter, aggregates by region_id and category_id and returns one row per (category_id, 
+region_id) pair — perhaps 50 rows for 5 categories × 10 regions. MariaDB then joins those 
+50 rows against the small InnoDB tables.
 
 Verify with EXPLAIN:
 
