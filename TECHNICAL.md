@@ -3,8 +3,8 @@
 ## SQL Dialect — MariaDB is the Gatekeeper
 
 It is improtant to know that **all SQL passes through MariaDB's parser first**. If 
-MariaDB doesn't recognize the syntax, it never reaches DuckDB — not even inside a 
-subquery or CTE. This has practical consequences for what you can and cannot write.
+MariaDB doesn't recognize the syntax or function it will never reaches DuckDB — not even inside a 
+subquery or CTE. This has practical consequences for what you can and cannot write. 
 
 ### What MariaDB blocks
 
