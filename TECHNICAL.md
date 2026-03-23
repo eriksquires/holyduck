@@ -1,81 +1,13 @@
 # MariaDB DuckDB Storage Engine — Technical Reference
 
-## Feature Status
-
-### DDL
-- `CREATE TABLE ... ENGINE=DUCKDB` — creates a shared `#duckdb/global.duckdb` file per database
-- `DROP TABLE` — removes table from DuckDB
-- `RENAME TABLE` — renames table in DuckDB
-- `TRUNCATE TABLE` — pushed as DuckDB native TRUNCATE
-- `ALTER TABLE ADD COLUMN` — pushed to DuckDB inplace
-- `ALTER TABLE DROP COLUMN` — pushed to DuckDB inplace
-- `ALTER TABLE RENAME COLUMN` / `CHANGE col` — pushed to DuckDB inplace
-- `CREATE INDEX` / `DROP INDEX` — pushed to DuckDB inplace via inplace ALTER API
-
-### DML
-- `INSERT INTO` (single-row) — SQL path, enforces PK/UNIQUE constraints, returns 1022 on duplicate
-- `INSERT INTO` (multi-row bulk) — DuckDB Appender path, enforces constraints, rejects entire batch on duplicate
-- `REPLACE INTO` — uses DuckDB `INSERT OR REPLACE INTO`, handles conflict atomically
-- `UPDATE ... WHERE` — direct pushdown: `UPDATE table SET ... WHERE pushed_where`
-- `DELETE ... WHERE` — direct pushdown: `DELETE FROM table WHERE pushed_where`
-
-### Query Pushdown
-
-HolyDuck implements three pushdown paths. EXPLAIN output tells you which fired:
-
-| EXPLAIN output | When it fires | What runs in DuckDB |
-|---|---|---|
-| `PUSHED SELECT` | All tables in query are DUCKDB | Entire SELECT including GROUP BY, ORDER BY |
-| `PUSHED UNION` | All arms of UNION/INTERSECT/EXCEPT are DUCKDB | Entire set operation |
-| `PUSHED DERIVED` | CTE or subquery references only DUCKDB tables | Entire CTE/subquery |
-
-For mixed-engine queries where pushdown cannot fire on the full query, two optimizations still apply:
-
-- **Condition pushdown** via `cond_push()`: WHERE conditions are pushed into the DuckDB scan query, filtering rows before they reach MariaDB.
-- **Column subset scan**: `rnd_init()` reads `table->read_set` and emits `SELECT col1, col2` instead of `SELECT *`, reducing data transfer.
-
-### Concurrency
-- Write locks upgraded to `TL_WRITE` in `store_lock()` — MariaDB serializes concurrent writers
-  at the table level (DuckDB only supports one writer at a time).
-- Concurrent readers work via DuckDB's MVCC — readers never blocked by other readers.
-- Readers briefly blocked during active writes.
-
-### MariaDB Function Compatibility
-Macros installed into DuckDB at startup translate MariaDB function names:
-- `DATE_FORMAT`, `UNIX_TIMESTAMP`, `FROM_UNIXTIME`, `LAST_DAY`
-- `LOCATE`, `MID`, `SPACE`, `STRCMP`, `REGEXP_SUBSTR`, `FIND_IN_SET`
-- `IF`
-- `RoundDateTime(dt, bucket_secs)` — wraps DuckDB's native `time_bucket()` for time bucketing
-- `CHAR(n)` rewritten to `chr(n)` in the SQL rewrite pass
-- `<cache>(expr)` wrappers from MariaDB's AST printer stripped automatically
-
-Macros live in `sql/duckdb_mariadb_compat.sql` — edit and redeploy without recompiling.
-
-### Data Type Support
-| MariaDB Type | DuckDB Type |
-|---|---|
-| TINYINT, SMALLINT, INT, MEDIUMINT | INTEGER |
-| BIGINT | BIGINT |
-| FLOAT | FLOAT |
-| DOUBLE | DOUBLE |
-| DECIMAL | DECIMAL |
-| DATE | DATE |
-| TIME | TIME |
-| DATETIME, TIMESTAMP | TIMESTAMP |
-| VARCHAR, TEXT, BLOB, etc. | VARCHAR |
-
----
-
-## Writing Queries for HolyDuck
+## Optimizing Queries for HolyDuck
 
 The most important thing to understand about mixed-engine queries: **MariaDB will push
 WHERE conditions down to DuckDB**, so date filters, range filters, and equality conditions
 on DuckDB columns all execute inside DuckDB before rows are returned. What MariaDB
-*cannot* push down are filters that depend on values from another table (e.g. `WHERE s.id = c.id`),
-and it cannot push aggregations across engine boundaries. If your query joins a DuckDB table
-directly against an InnoDB table and groups the result, MariaDB receives the filtered DuckDB
-rows and performs the GROUP BY itself. For large DuckDB tables this is the difference between
-milliseconds and minutes.
+*cannot* push down are filters that depend on values from external (non-duck) tables (e.g. `WHERE s.id = c.id`). If your query joins a DuckDB table directly against an InnoDB table and groups the result, MariaDB receives the filtered DuckDB rows and performs the GROUP BY itself. 
+
+Fortunately worst case scenarios are rarely existential crisis but we can write SQL in a way that works around this limitation.
 
 The solution is to restructure the query so the heavy DuckDB work happens in a CTE or
 subquery first — then `PUSHED DERIVED` fires and the entire aggregation runs inside DuckDB,
@@ -153,12 +85,78 @@ Look for `select_type: PUSHED DERIVED` — that confirms DuckDB is doing the wor
 
 Whenever you have a large DuckDB table joining against InnoDB:
 
-1. Move all DuckDB scanning, filtering, and aggregation into a CTE
+1. Move all DuckDB scanning, filtering, and aggregation into a CTE or subquery (same benefit)
 2. Join the CTE result (small) against InnoDB (also small)
 3. MariaDB only touches small row counts on both sides
 
 This pattern works for any depth of aggregation — daily buckets, percentiles, window functions,
 `RoundDateTime` time bucketing — as long as the CTE references only DuckDB tables.
+
+---
+
+## Feature Status
+
+### DDL
+- `CREATE TABLE ... ENGINE=DUCKDB` — creates a shared `#duckdb/global.duckdb` file per database
+- `DROP TABLE` — removes table from DuckDB
+- `RENAME TABLE` — renames table in DuckDB
+- `TRUNCATE TABLE` — pushed as DuckDB native TRUNCATE
+- `ALTER TABLE ADD COLUMN` — pushed to DuckDB inplace
+- `ALTER TABLE DROP COLUMN` — pushed to DuckDB inplace
+- `ALTER TABLE RENAME COLUMN` / `CHANGE col` — pushed to DuckDB inplace
+- `CREATE INDEX` / `DROP INDEX` — pushed to DuckDB inplace via inplace ALTER API
+
+### DML
+- `INSERT INTO` (single-row) — SQL path, enforces PK/UNIQUE constraints, returns 1022 on duplicate
+- `INSERT INTO` (multi-row bulk) — DuckDB Appender path, enforces constraints, rejects entire batch on duplicate
+- `REPLACE INTO` — uses DuckDB `INSERT OR REPLACE INTO`, handles conflict atomically
+- `UPDATE ... WHERE` — direct pushdown: `UPDATE table SET ... WHERE pushed_where`
+- `DELETE ... WHERE` — direct pushdown: `DELETE FROM table WHERE pushed_where`
+
+### Query Pushdown
+
+HolyDuck implements three pushdown paths. EXPLAIN output tells you which fired:
+
+| EXPLAIN output | When it fires | What runs in DuckDB |
+|---|---|---|
+| `PUSHED SELECT` | All tables in query are DUCKDB | Entire SELECT including GROUP BY, ORDER BY |
+| `PUSHED UNION` | All arms of UNION/INTERSECT/EXCEPT are DUCKDB | Entire set operation |
+| `PUSHED DERIVED` | CTE or subquery references only DUCKDB tables | Entire CTE/subquery |
+
+For mixed-engine queries where pushdown cannot fire on the full query, two optimizations still apply:
+
+- **Condition pushdown** via `cond_push()`: WHERE conditions are pushed into the DuckDB scan query, filtering rows before they reach MariaDB.
+- **Column subset scan**: `rnd_init()` reads `table->read_set` and emits `SELECT col1, col2` instead of `SELECT *`, reducing data transfer.
+
+### Concurrency
+- Write locks upgraded to `TL_WRITE` in `store_lock()` — MariaDB serializes concurrent writers
+  at the table level (DuckDB only supports one writer at a time).
+- Concurrent readers work via DuckDB's MVCC — readers never blocked by other readers.
+- Readers briefly blocked during active writes.
+
+### MariaDB Function Compatibility
+Macros installed into DuckDB at startup translate MariaDB function names:
+- `DATE_FORMAT`, `UNIX_TIMESTAMP`, `FROM_UNIXTIME`, `LAST_DAY`
+- `LOCATE`, `MID`, `SPACE`, `STRCMP`, `REGEXP_SUBSTR`, `FIND_IN_SET`
+- `IF`
+- `RoundDateTime(dt, bucket_secs)` — wraps DuckDB's native `time_bucket()` for time bucketing
+- `CHAR(n)` rewritten to `chr(n)` in the SQL rewrite pass
+- `<cache>(expr)` wrappers from MariaDB's AST printer stripped automatically
+
+Macros live in `sql/duckdb_mariadb_compat.sql` — edit and redeploy without recompiling.
+
+### Data Type Support
+| MariaDB Type | DuckDB Type |
+|---|---|
+| TINYINT, SMALLINT, INT, MEDIUMINT | INTEGER |
+| BIGINT | BIGINT |
+| FLOAT | FLOAT |
+| DOUBLE | DOUBLE |
+| DECIMAL | DECIMAL |
+| DATE | DATE |
+| TIME | TIME |
+| DATETIME, TIMESTAMP | TIMESTAMP |
+| VARCHAR, TEXT, BLOB, etc. | VARCHAR |
 
 ---
 

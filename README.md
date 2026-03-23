@@ -58,92 +58,49 @@ One big benefit, if you can live with single writers, is you now have a sharable
 
 If your workload fits on one machine, HolyDuck will likely be faster and infinitely simpler to run.
 
-## Build Requirements
+## DuckDB Limitations
 
-- Linux x86-64
-- Docker
-- MariaDB 11.8.3 source tree (cloned by `fetch-deps.sh`)
-- DuckDB v1.5.0 (downloaded by `fetch-deps.sh`)
+DuckDB does not handle more than one write connection at a time.  HolyDuck does, but the entire engine blocks per write operation.  That is, you and your colleagues can open and access DuckDB tables and queries against them, if anyone start any change operation you will block all other writers.  
 
-## Getting Started
+HoldyDuck is much more team friendly in a sense than raw DuckDB, but it's a gift, not magic.  
 
-### 1. Fetch dependencies
+## Installation
 
-```bash
-./scripts/fetch-deps.sh
-export MARIADB_SRC_DIR=<path printed by fetch-deps.sh>
-```
+Pre-built binaries are available on the [Releases](https://github.com/eriksquires/HolyDuck/releases) page for Ubuntu 22.04, Oracle Linux 8, and Oracle Linux 9.
 
-This clones the MariaDB 11.8.3 source tree and downloads `libduckdb.so`. Both versions are configurable:
-
-```bash
-MARIADB_VERSION=11.8.3 DUCKDB_VERSION=v1.5.0 ./scripts/fetch-deps.sh
-```
-
-### 2. Build the Docker base image
-
-```bash
-./scripts/build-base.sh ubuntu     # Ubuntu 22.04
-./scripts/build-base.sh oracle8    # Oracle Linux 8
-./scripts/build-base.sh oracle9    # Oracle Linux 9
-```
-
-### 3. Start a container
-
-```bash
-./scripts/docker-run.sh ubuntu
-```
-
-### 4. Build MariaDB and configure the plugin (first time only, ~20-30 min)
-
-Note that this is not optional. Required header files are built by this step, so even if you don't really want to build the whole DB you have to, but only once per target OS/DB version.
-
-```bash
-./scripts/cmake-setup.sh duckdb-plugin-dev-ubuntu
-```
-
-This builds MariaDB from source inside the container and configures the plugin's cmake. Build artifacts persist via the bind-mounted source directory — subsequent runs skip the MariaDB build.
-
-### 5. Build and deploy the plugin
-
-```bash
-./scripts/deploy.sh duckdb-plugin-dev-ubuntu
-```
-
-Builds `ha_duckdb.so`, copies it into the container, restarts MariaDB, installs the plugin, and verifies it loaded. Run this after every code change.
-
-### 6. Connect and test
-
-```bash
-docker exec -it duckdb-plugin-dev-ubuntu mariadb -uroot -ptestpass
-```
+### 1. Find your plugin directory
 
 ```sql
-CREATE TABLE t (id INT, val DOUBLE) ENGINE=DUCKDB;
-INSERT INTO t VALUES (1, 10.5), (2, 20.0), (3, 15.5);
-SELECT AVG(val) FROM t;
+SELECT @@plugin_dir;
 ```
 
-## Pre-built Binaries
+### 2. Copy the files
 
-Pre-built `.so` files for each distro are available on the [Releases](https://github.com/eriksquires/HolyDuck/releases) page. Download the appropriate file, place it in your MariaDB plugin directory, and:
+Download `ha_duckdb-<distro>.so` and `duckdb_mariadb_compat.sql` from the release page,
+then copy both into your plugin directory:
+
+```bash
+cp ha_duckdb-ubuntu22.so /path/to/plugin_dir/ha_duckdb.so
+cp duckdb_mariadb_compat.sql /path/to/plugin_dir/duckdb_mariadb_compat.sql
+```
+
+### 3. Install the plugin
 
 ```sql
 INSTALL PLUGIN duckdb SONAME 'ha_duckdb.so';
 ```
 
-## Development Workflow
+### 4. Verify
 
-```bash
-# Edit source
-vim src/ha_duckdb.cc
-
-# Build, deploy, restart MariaDB, verify — one command
-./scripts/deploy.sh duckdb-plugin-dev-ubuntu
-
-# Connect
-docker exec -it duckdb-plugin-dev-ubuntu mariadb -uroot -ptestpass
+```sql
+SELECT ENGINE, SUPPORT, COMMENT FROM information_schema.ENGINES WHERE ENGINE='DUCKDB';
 ```
+
+You should see `SUPPORT: YES`. You're ready to create DuckDB tables.
+
+## Building from Source
+
+See [BUILDING.md](BUILDING.md) for the full build workflow — Docker base images, MariaDB source setup, cmake configuration, and iterative development cycle.
 
 ## License
 
