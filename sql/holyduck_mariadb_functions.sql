@@ -8,8 +8,8 @@
 --   2. Provide correct fallback behavior when queries run against
 --      non-DuckDB (e.g. InnoDB) tables.
 --
--- Install once per MariaDB instance:
---   mariadb -uroot -p < holyduck_mariadb_functions.sql
+-- Install once per database that needs these functions:
+--   mariadb -uroot -p mydb < holyduck_mariadb_functions.sql
 --
 -- The matching DuckDB macros are installed automatically at plugin
 -- startup from duckdb_mariadb_compat.sql.
