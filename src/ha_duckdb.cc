@@ -293,6 +293,7 @@ static select_handler  *create_duckdb_unit_handler(THD *thd,
                                                     SELECT_LEX_UNIT *unit);
 static derived_handler *create_duckdb_derived_handler(THD *thd,
                                                       TABLE_LIST *derived);
+static int duckdb_discover_table(handlerton *hton, THD *thd, TABLE_SHARE *share);
 
 static int duckdb_init_func(void *p)
 {
@@ -306,11 +307,12 @@ static int duckdb_init_func(void *p)
                    MY_MUTEX_INIT_FAST);
 
   duckdb_hton= (handlerton *)p;
-  duckdb_hton->create=        create_duckdb_handler;
-  duckdb_hton->create_select=  create_duckdb_select_handler;
-  duckdb_hton->create_unit=    create_duckdb_unit_handler;
-  duckdb_hton->create_derived= create_duckdb_derived_handler;
-  duckdb_hton->flags=         0;
+  duckdb_hton->create=          create_duckdb_handler;
+  duckdb_hton->create_select=   create_duckdb_select_handler;
+  duckdb_hton->create_unit=     create_duckdb_unit_handler;
+  duckdb_hton->create_derived=  create_duckdb_derived_handler;
+  duckdb_hton->discover_table=  duckdb_discover_table;
+  duckdb_hton->flags=           0;
   duckdb_hton->tablefile_extensions= ha_duckdb_exts;
 
   DBUG_RETURN(0);
@@ -320,6 +322,88 @@ static int duckdb_done_func(void *)
 {
   mysql_mutex_destroy(&g_duckdb_mutex);
   return 0;
+}
+
+// ---------------------------------------------------------------------------
+// Table discovery
+//
+// Called by MariaDB when a query references a table not in its catalog.
+// We query DuckDB's information_schema.columns for the name, build a
+// CREATE TABLE string from the result, and hand it to MariaDB via
+// init_from_sql_statement_string(). Works transparently for both DuckDB
+// base tables and views — MariaDB never needs to know the difference.
+// ---------------------------------------------------------------------------
+
+// Map a DuckDB data_type string (from information_schema) to a MariaDB type name.
+static const char *duckdb_type_to_mariadb(const std::string &dtype)
+{
+  if (dtype == "BIGINT")                          return "BIGINT";
+  if (dtype == "INTEGER" || dtype == "INT")       return "INT";
+  if (dtype == "SMALLINT" || dtype == "HUGEINT")  return "BIGINT";
+  if (dtype == "TINYINT")                         return "TINYINT";
+  if (dtype == "FLOAT")                           return "FLOAT";
+  if (dtype == "DOUBLE" || dtype == "DECIMAL")    return "DOUBLE";
+  if (dtype == "DATE")                            return "DATE";
+  if (dtype == "TIME")                            return "TIME";
+  if (dtype == "TIMESTAMP" || dtype == "TIMESTAMP WITH TIME ZONE")
+                                                  return "DATETIME";
+  if (dtype == "BOOLEAN")                         return "TINYINT";
+  // Default: treat unknown types as VARCHAR
+  return "VARCHAR(255)";
+}
+
+static int duckdb_discover_table(handlerton *hton, THD *thd, TABLE_SHARE *share)
+{
+  DBUG_ENTER("duckdb_discover_table");
+
+  std::string db_file= std::string(mysql_real_data_home) + "#duckdb/global.duckdb";
+  std::string db_name(share->db.str, share->db.length);
+  std::string table_name(share->table_name.str, share->table_name.length);
+
+  duckdb::DuckDB *db= registry_get(db_file);
+  if (!db)
+    DBUG_RETURN(HA_ERR_NO_SUCH_TABLE);
+
+  int rc= HA_ERR_NO_SUCH_TABLE;
+  try
+  {
+    duckdb::Connection conn(*db);
+    std::string sql=
+      "SELECT column_name, data_type "
+      "FROM information_schema.columns "
+      "WHERE table_schema = '" + db_name + "' "
+      "AND table_name = '" + table_name + "' "
+      "ORDER BY ordinal_position";
+
+    auto result= conn.Query(sql);
+    if (result->HasError() || result->RowCount() == 0)
+    {
+      registry_release(db_file);
+      DBUG_RETURN(HA_ERR_NO_SUCH_TABLE);
+    }
+
+    // Build: CREATE TABLE name (col1 TYPE1, col2 TYPE2, ...) ENGINE=DUCKDB
+    std::string create= "CREATE TABLE `" + db_name + "`.`" + table_name + "` (";
+    for (size_t i= 0; i < result->RowCount(); i++)
+    {
+      if (i > 0) create += ", ";
+      std::string col_name= result->GetValue(0, i).ToString();
+      std::string col_type= result->GetValue(1, i).ToString();
+      create += "`" + col_name + "` " + duckdb_type_to_mariadb(col_type);
+    }
+    create += ") ENGINE=DUCKDB";
+
+    rc= share->init_from_sql_statement_string(thd, false,
+                                              create.c_str(), create.length());
+  }
+  catch (const std::exception &e)
+  {
+    sql_print_error("DuckDB discover_table exception: %s", e.what());
+    rc= HA_ERR_NO_SUCH_TABLE;
+  }
+
+  registry_release(db_file);
+  DBUG_RETURN(rc);
 }
 
 static handler *create_duckdb_handler(handlerton *hton, TABLE_SHARE *table,
