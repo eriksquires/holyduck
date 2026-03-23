@@ -242,6 +242,17 @@ to re-run after upgrades.
 | DATETIME, TIMESTAMP | TIMESTAMP |
 | VARCHAR, TEXT, BLOB, etc. | VARCHAR |
 
+Type mapping happens in two places in `src/ha_duckdb.cc`:
+
+- **DDL mapping (~line 387)** — converts `MYSQL_TYPE_*` constants to DuckDB type name strings
+  when `CREATE TABLE ... ENGINE=DUCKDB` is executed. This is the source of truth for what
+  DuckDB column type gets created on disk.
+- **Value mapping (~lines 661, 773, 1304, 1415)** — converts field values between MariaDB and
+  DuckDB representations at query time (reads and writes).
+
+Note that several MariaDB integer types (TINYINT, SMALLINT, MEDIUMINT) all map to DuckDB INTEGER.
+DuckDB stores them efficiently regardless; the distinction only matters at the MariaDB display layer.
+
 ---
 
 ## Architecture
