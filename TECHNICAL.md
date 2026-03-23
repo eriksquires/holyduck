@@ -189,6 +189,9 @@ The problem at this point is that MariaDB won't pass RoundDateTime to DuckDb yet
 see it as a missing or undeclared function.  We get around this by ALSO creating it for 
 MariaDB.
 
+The user will have to install these functions per DB when needed, HolyDuck does not 
+automatically install them (unlike the DuckDB marcos). 
+
 `holyduck_mariadb_functions.sql` contains the MariaDB stored function:
 ```sql
 CREATE FUNCTION IF NOT EXISTS RoundDateTime(dt DATETIME, bucket_secs INT)
