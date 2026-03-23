@@ -75,22 +75,23 @@ SELECT c.name AS category,
        r.name AS region,
        SUM(s.amount) AS total_sales,
        COUNT(*) AS order_count
-FROM sales s
-JOIN categories c ON s.category_id = c.id
-JOIN regions r ON s.region_id = r.id
-WHERE s.ts BETWEEN '2026-01-01' AND '2026-03-31'
+FROM sales s  -- DuckDB table
+   JOIN categories c ON s.category_id = c.id
+   JOIN regions r ON s.region_id = r.id
+WHERE
+   s.ts BETWEEN '2026-01-01' AND '2026-03-31'
 GROUP BY c.name, r.name
 ORDER BY total_sales DESC;
 ```
 
-What happens: MariaDB pushes the date filter into DuckDB, so only the matching rows come back —
-that part works well. But the GROUP BY runs in MariaDB after the join, meaning potentially
+What happens: MariaDB pushes the only filter it can (date and time) into DuckDB, but the GROUP BY runs in MariaDB after the join, meaning potentially
 hundreds of thousands of filtered rows flow across the engine boundary before aggregation happens.
 
 **Optimized with CTE — fast:**
 
 ```sql
 WITH sales_summary AS (
+   -- This happens 100% in DuckDB
     SELECT category_id,
            region_id,
            SUM(amount) AS total_sales,
@@ -99,6 +100,9 @@ WITH sales_summary AS (
     WHERE ts BETWEEN '2026-01-01' AND '2026-03-31'
     GROUP BY category_id, region_id
 )
+-- 
+-- sales_summary is a tiny number of rows
+--
 SELECT c.name AS category,
        r.name AS region,
        ss.total_sales,
