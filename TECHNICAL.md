@@ -227,7 +227,7 @@ HolyDuck has a sample SQL file with supported MariaDB stored functions: holyduck
 which includes RoundDateTime() 
 
 We should point out that this is only needed for NEW functions or features not in MariaDB.  In cases
-when the issue is a missign function from MariaDB you only need to create a new macro and restart 
+when the issue is DuckDB lacks a function which exists in MariaDB you only need to create a new macro and restart 
 MariaDB. 
 
 ---
