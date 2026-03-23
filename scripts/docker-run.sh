@@ -23,8 +23,15 @@ mkdir -p "${DATA_DIR}"
 
 echo "Starting MariaDB DuckDB Plugin development environment ($DISTRO)..."
 
+# Only one duckdb-plugin-dev-* container runs at a time (port 3306 is shared).
+# Stop any other running dev container before starting the requested one.
+for running in $(docker ps --format '{{.Names}}' | grep '^duckdb-plugin-dev-' | grep -v "^${CONTAINER_NAME}$"); do
+    echo "Stopping ${running} to free port 3306..."
+    docker stop "${running}" > /dev/null
+done
+
 # Check if container already exists
-if docker ps -a --format 'table {{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
+if docker ps -a --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
     echo "Starting existing container..."
     docker start "$CONTAINER_NAME"
 else
