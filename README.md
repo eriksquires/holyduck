@@ -45,6 +45,7 @@ MariaDB's ColumnStore is the official MariaDB analytical storage engine in this 
 
 |                           | HolyDuck                          | ColumnStore                          |
 | ------------------------- | --------------------------------- | ------------------------------------ |
+| Architecture              | In-process — runs inside mysqld   | Separate process / service           |
 | Concurrent writers        | Single writer (DuckDB limitation) | Parallel ingestion                   |
 | High availability         | None — local file only            | MariaDB replication + clustering     |
 | Multi-server              | Single node                       | Distributed across nodes             |

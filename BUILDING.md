@@ -39,7 +39,7 @@ MARIADB_VERSION=11.8.3 DUCKDB_VERSION=v1.5.0 ./scripts/fetch-deps.sh
 ### 4. Build MariaDB and configure the plugin (first time only, ~20-30 min)
 
 Note that this is not optional. Required header files are built by this step, so even if you
-don't really want to build the whole DB you have to — but only once per target OS/DB version.
+don't really want to build the whole DB you have to — but only once per target OS/DB version.  As a result of this you'll want to refer to the MariaDB source docs for more complete build instructions. 
 
 ```bash
 ./scripts/cmake-setup.sh duckdb-plugin-dev-ubuntu
