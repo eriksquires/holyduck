@@ -195,10 +195,10 @@ CREATE FUNCTION IF NOT EXISTS RoundDateTime(dt DATETIME, bucket_secs INT)
 RETURNS DATETIME DETERMINISTIC
 RETURN FROM_UNIXTIME(FLOOR(UNIX_TIMESTAMP(dt) / bucket_secs) * bucket_secs);
 ```
-Notice that the dfinition is slightly different, as the DuckDb macro is optimized
-for DuckDB. 
+Notice that the definition is slightly different, as the DuckDB macro is optimized
+for DuckDB.
 
-### Example 1: 
+### Example 1: RoundDateTime on a DuckDB table
 Query against a DuckDB table:
 ```sql
 SELECT RoundDateTime(ts, 300) FROM duckdb_metrics;
