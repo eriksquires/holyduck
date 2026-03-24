@@ -17,9 +17,9 @@ That really explains everything about these two projects.  From this point on we
 
 ## Code Base
 
-Lets spell out the big overarching and fundamental difference in these two products: 
+As noted above, the fundamental difference is how each project handles mixed-engine joins — and that starts with what each product actually is:
 
-**AliSQL** is a MySQL 8 fork with DuckDB inside it. 
+**AliSQL** is a MySQL 8 fork with DuckDB inside it.
 
 **HolyDuck** is a MariaDB 11.8.3 storage engine plugin with a DuckDB back-end.
 
