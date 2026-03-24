@@ -180,6 +180,4 @@ is converted to DuckDB and SQL is passed through directly to DuckDB's native eng
 mixed joins are a non-issue because InnoDB user tables don't exist on that node.
 HolyDuck lives alongside InnoDB on the same instance, uses MariaDB's `select_handler`
 and `derived_handler` APIs for pushdown, and solves the hard problem of mixed-engine
-joins by injecting InnoDB tables into DuckDB at query time. A developer building
-either from scratch, given the same API constraints, would inevitably produce files
-named `ha_duckdb.cc` with a class called `ha_duckdb` — that is not evidence of copying.
+joins by injecting InnoDB tables into DuckDB at query time.
