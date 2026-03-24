@@ -83,7 +83,7 @@ The two implementations differ fundamentally in how they use DuckDB.
 **HolyDuck** handles mixed DuckDB + InnoDB queries by injecting InnoDB tables into
 DuckDB as temporary tables at query time, then pushing the entire query — including
 the join, aggregation, and ordering — to DuckDB. The result is that mixed-engine
-analytical queries run at full DuckDB speed.
+analytical queries run very fast.
 
 **AliSQL** does not support mixed-engine joins — by design. On an AliSQL analytical
 replica, a `convert_all_to_duckdb_at_start` option converts every user table to
