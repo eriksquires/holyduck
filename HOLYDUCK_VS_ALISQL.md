@@ -33,7 +33,8 @@ We can start comparing the two projects by looking at what is in the public repo
 | DuckDB code as % of total     | < 0.1%            | 100% — it's the whole project      |
 | Fork required                 | Yes               | No — drops into unmodified MariaDB |
 
-We'll further discuss why code reuse from AliSQL would be counter productive for HolyDuck below. 
+We'll further discuss why code reuse from AliSQL would be counterproductive for HolyDuck below.
+
 ---
 
 ## Fundamentally Different Operation and Goals
