@@ -27,7 +27,6 @@ One big obvious way to see differences is in what is in the public repo of each.
 | DuckDB code as % of total     | < 0.1%            | 100% — it's the whole project      |
 | Fork required                 | Yes               | No — drops into unmodified MariaDB |
 
-
 ---
 
 ## Fundamentally Different Operation and Goals
@@ -104,10 +103,8 @@ bypassed entirely for pushed queries.
 a full SQL string pass-through: MySQL parses and validates the query, then hands the
 entire SQL string directly to DuckDB's native engine via `duckdb_query_and_send()`.
 DuckDB does all the execution. This works because on an AliSQL analytical replica,
-*all* user tables have been converted to DuckDB — there are no InnoDB user tables
-left for MySQL to need to coordinate with.
-
-
+all user data tables have been converted to DuckDB — InnoDB remains but holds only
+system metadata (accounts, configuration), so there is nothing to join across engines.
 
 ### Index and Row-Position Operations
 
