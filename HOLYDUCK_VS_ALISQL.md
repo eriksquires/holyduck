@@ -13,28 +13,26 @@ Lets spell out the big overarching and fundamental difference in these two produ
 
 **AliSQL** is a MySQL 8 fork with DuckDB inside it. 
 
-**HolyDuck** is an engine plugin for DuckDB with a 9 MB binary for MariaDB 11.8.3.   
+**HolyDuck** is a storage engine plugin for DuckDB with a 9 MB binary compatible with MariaDB 11.8.3.   
 
 One big obvious way to see differences is in what is in the public repo of each. As of March 24, 2026: 
 
-|                               | AliSQL                                   | HolyDuck                           |
-| ----------------------------- | ---------------------------------------- | ---------------------------------- |
-| Base                          | MySQL 8.0.44 fork                        | MariaDB plugin (standalone)        |
-| Source Files to Build         | ~ 49,000                                 | 2                                  |
-| Source code lines             | ~12.4 million                            | 3,271                              |
-| DuckDB-specific source files  | 35                                       | 2                                  |
-| DuckDB-specific lines of code | 9,244                                    | 3,271                              |
-| DuckDB code as % of total     | ~0.3% of a full server fork              | 100% — it's the whole project      |
-| Fork required                 | Yes                                      | No — drops into unmodified MariaDB |
+|                               | AliSQL            | HolyDuck                           |
+| ----------------------------- | ----------------- | ---------------------------------- |
+| Base                          | MySQL 8.0.44 fork | MariaDB plugin (standalone)        |
+| Source Files to Build         | ~ 49,000          | 2                                  |
+| Source code lines             | ~12.4 million     | 3,271                              |
+| DuckDB-specific source files  | 35                | 2                                  |
+| DuckDB-specific lines of code | 9,244             | 3,271                              |
+| DuckDB code as % of total     | < 0.1%            | 100% — it's the whole project      |
+| Fork required                 | Yes               | No — drops into unmodified MariaDB |
 
 
 ---
 
 ## Fundamentally Different Operation and Goals
 
-Just looking at the DuckDB specific code lines you can see HolyDuck is 1/3 the size.   However one could reasonably ask:  did we lift any code from AliSQL for our work? No.  
-
-We get into details here.
+Just looking at the DuckDB specific code lines you can see HolyDuck is 1/3 the size.   However one could reasonably ask:  did we lift any code from AliSQL for our work? No.  Once you understand the difference in architecture and how we each answer questions about table joins it becomes crystal clear that there's no room for overlap. 
 
 **AliSQL's DuckDB integration is HTAP** — Hybrid Transactional/Analytical Processing.
 The design goal is to give you real-time analytical reads on your *existing* InnoDB data
@@ -63,7 +61,7 @@ These are different questions with different answers.
 The following similarities exist because they are mandated by the MySQL/MariaDB
 storage engine plugin API. Any two independent implementations would share them:
 
-- **File names** `ha_duckdb.h` / `ha_duckdb.cc` — the `ha_<engine>.{h,cc}` naming convention is required by MariaDB/MySQL for all storage engine handlers.  Honestly I grant you we may have identical file names, kind of unavoidable. 
+- **File names** `ha_duckdb.h` / `ha_duckdb.cc` — the `ha_<engine>.{h,cc}` naming convention is required by MariaDB/MySQL for all storage engine handlers.  
 - **Class declaration** `class ha_duckdb : public handler` — the base class and name
   are dictated by the plugin API.
 - **Standard handler methods** (`rnd_init`, `rnd_next`, `write_row`, `create`,
@@ -80,6 +78,20 @@ typing `int main()`. It is not copying — it is the interface.
 
 The two implementations differ fundamentally in how they use DuckDB.
 
+### Mixed-Engine Query Handling
+
+Without meaning to speak for the AliSQL team, we believe that AliSQL is fundamentally designed to avoid mixed-engine queries.  That is, joins with tables in and out of duckdb.  On the other hand, HolyDuck tackles this problem head on and assumes only some tables will be in DuckDB.  This naturally leads to completely different sets of features which are or are not supported in each. 
+
+**HolyDuck** handles mixed DuckDB + InnoDB queries by injecting InnoDB tables into
+DuckDB as temporary tables at query time, then pushing the entire query — including
+the join, aggregation, and ordering — to DuckDB. The result is that mixed-engine
+analytical queries run at full DuckDB speed.
+
+**AliSQL** does not support mixed-engine joins — by design. On an AliSQL analytical
+replica, a `convert_all_to_duckdb_at_start` option converts every user table to
+DuckDB. InnoDB on the replica holds only system metadata (accounts, configuration).
+Since all user data is in DuckDB, mixed joins never arise.
+
 ### Query Execution Model
 
 **HolyDuck** uses MariaDB's `select_handler` and `derived_handler` APIs to push
@@ -88,21 +100,14 @@ functions, and CTEs — directly into DuckDB. MariaDB hands off the query; DuckD
 executes it and returns a result set. MariaDB's row-by-row execution engine is
 bypassed entirely for pushed queries.
 
-**AliSQL** does not use `select_handler` or `derived_handler` at all. MySQL's
-optimizer drives all query execution. DuckDB acts as a storage backend that MySQL
-scans row-by-row via `rnd_next()`. DuckDB's analytical capabilities are not
-leveraged for query execution — only for storage and retrieval.
+**AliSQL** does not use `select_handler` or `derived_handler` at all. Instead it uses
+a full SQL string pass-through: MySQL parses and validates the query, then hands the
+entire SQL string directly to DuckDB's native engine via `duckdb_query_and_send()`.
+DuckDB does all the execution. This works because on an AliSQL analytical replica,
+*all* user tables have been converted to DuckDB — there are no InnoDB user tables
+left for MySQL to need to coordinate with.
 
-### Mixed-Engine Query Handling
 
-**HolyDuck** handles mixed DuckDB + InnoDB queries by injecting InnoDB tables into
-DuckDB as temporary tables at query time, then pushing the entire query — including
-the join, aggregation, and ordering — to DuckDB. The result is that mixed-engine
-analytical queries run at full DuckDB speed.
-
-**AliSQL** handles mixed-engine queries through MySQL's standard join machinery.
-MySQL fetches rows from DuckDB tables one at a time and joins them with InnoDB rows
-in its own execution engine.
 
 ### Index and Row-Position Operations
 
@@ -114,7 +119,8 @@ DuckDB's vectorised execution.
 
 **AliSQL** fully exposes index scans to MySQL. It implements `index_read_map()`,
 `index_next()`, `index_prev()`, `index_first()`, `index_last()`, and `rnd_pos()`.
-MySQL's optimizer can plan range scans and ref joins against DuckDB tables directly.
+These are used for single-table row-level access (e.g. DML via binlog replay);
+analytical queries go through the SQL pass-through path instead.
 
 ### Write Path and Transaction Support
 
@@ -153,9 +159,9 @@ instance and per-thread connections maintained in the MySQL `THD` context
 
 | Aspect | HolyDuck | AliSQL |
 |---|---|---|
-| Query execution | Whole-query pushdown (`select_handler`, `derived_handler`) | Row-at-a-time; MySQL drives all execution |
-| Mixed-engine joins | Inject InnoDB as DuckDB temp tables; push full query to DuckDB | MySQL row-by-row join machinery |
-| Index scans | Hidden from optimizer — no `rnd_pos`, no `index_read_map` | Fully exposed; MySQL can plan range/ref joins |
+| Query execution | Whole-query pushdown (`select_handler`, `derived_handler`) | Full SQL string pass-through to DuckDB's native engine |
+| Mixed-engine joins | Inject InnoDB as DuckDB temp tables; push full query to DuckDB | Not supported — all user tables are DuckDB on analytical replica |
+| Index scans | Hidden from optimizer — no `rnd_pos`, no `index_read_map` | Fully exposed; used for row-level DML (binlog replay) |
 | Transactions | Not supported (DuckDB limitation) | Full 2PC, binlog, replication |
 | Write buffering | Direct DuckDB Appender | DeltaAppender with transaction-aware rollback |
 | SQL rewriting | Macro system + targeted rewrite pass | Explicit DDL/DML convertor classes |
@@ -167,10 +173,12 @@ instance and per-thread connections maintained in the MySQL `THD` context
 ## Verdict
 
 The AliSQL and HolyDuck DuckDB plugins share a class name and file names because
-the MySQL/MariaDB plugin API requires them. Beyond that, they make opposite
-architectural choices: AliSQL builds a complete OLTP engine that uses DuckDB as
-a row store with index support and full transactional integrity; HolyDuck builds
-an analytics pushdown engine that hands entire queries to DuckDB and stays out of
-the way. A developer building either from scratch, given the same API constraints,
-would inevitably produce files named `ha_duckdb.cc` with a class called `ha_duckdb`
-— that is not evidence of copying.
+the MySQL/MariaDB plugin API requires them. Beyond that, they solve fundamentally
+different problems: AliSQL builds a dedicated analytical replica where all user data
+is converted to DuckDB and SQL is passed through directly to DuckDB's native engine —
+mixed joins are a non-issue because InnoDB user tables don't exist on that node.
+HolyDuck lives alongside InnoDB on the same instance, uses MariaDB's `select_handler`
+and `derived_handler` APIs for pushdown, and solves the hard problem of mixed-engine
+joins by injecting InnoDB tables into DuckDB at query time. A developer building
+either from scratch, given the same API constraints, would inevitably produce files
+named `ha_duckdb.cc` with a class called `ha_duckdb` — that is not evidence of copying.
