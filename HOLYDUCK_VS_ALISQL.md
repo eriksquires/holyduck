@@ -173,7 +173,7 @@ typing `int main()`. It is not copying — it is the interface.
 
 ## Verdict
 
-The AliSQL and HolyDuck solve fundamentally different problems: AliSQL builds a dedicated analytical replica where all user data
+AliSQL and HolyDuck solve fundamentally different problems: AliSQL builds a dedicated analytical replica where all user data
 is converted to DuckDB and SQL is passed through directly to DuckDB's native engine —
 mixed joins are a non-issue because InnoDB user tables don't exist on that node.
 HolyDuck lives alongside InnoDB on the same instance, uses MariaDB's `select_handler`
