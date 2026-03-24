@@ -11,7 +11,7 @@ The best way to describe how these two implement DuckDB differently is with thes
 
 **HolyDuck** tackles them. 
 
-That really explains everything about how these projects work and why they are so different.  From this point on we'll get into the details of  each repo and solution. 
+That really explains everything about how these projects work and why they are so different.  From this point on we'll get into the details of the two projects.
 
 ## Code Base
 
