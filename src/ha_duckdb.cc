@@ -294,6 +294,11 @@ static select_handler  *create_duckdb_unit_handler(THD *thd,
 static derived_handler *create_duckdb_derived_handler(THD *thd,
                                                       TABLE_LIST *derived);
 static int duckdb_discover_table(handlerton *hton, THD *thd, TABLE_SHARE *share);
+static int duckdb_discover_table_names(handlerton *hton, const LEX_CSTRING *db,
+                                       MY_DIR *dir,
+                                       handlerton::discovered_list *result);
+static int duckdb_discover_table_existence(handlerton *hton, const char *db,
+                                           const char *table_name);
 
 static int duckdb_init_func(void *p)
 {
@@ -311,7 +316,9 @@ static int duckdb_init_func(void *p)
   duckdb_hton->create_select=   create_duckdb_select_handler;
   duckdb_hton->create_unit=     create_duckdb_unit_handler;
   duckdb_hton->create_derived=  create_duckdb_derived_handler;
-  duckdb_hton->discover_table=  duckdb_discover_table;
+  duckdb_hton->discover_table=            duckdb_discover_table;
+  duckdb_hton->discover_table_names=      duckdb_discover_table_names;
+  duckdb_hton->discover_table_existence=  duckdb_discover_table_existence;
   duckdb_hton->flags=           0;
   duckdb_hton->tablefile_extensions= ha_duckdb_exts;
 
@@ -350,6 +357,69 @@ static const char *duckdb_type_to_mariadb(const std::string &dtype)
   if (dtype == "BOOLEAN")                         return "TINYINT";
   // Default: treat unknown types as VARCHAR
   return "VARCHAR(255)";
+}
+
+static int duckdb_discover_table_existence(handlerton *hton, const char *db,
+                                           const char *table_name)
+{
+  std::string db_file= std::string(mysql_real_data_home) + "#duckdb/global.duckdb";
+
+  duckdb::DuckDB *duck= registry_get(db_file);
+  if (!duck) return 0;
+
+  int exists= 0;
+  try
+  {
+    duckdb::Connection conn(*duck);
+    std::string sql=
+      "SELECT COUNT(*) FROM information_schema.tables "
+      "WHERE table_schema = '" + std::string(db) + "' "
+      "AND table_name = '" + std::string(table_name) + "'";
+    auto res= conn.Query(sql);
+    if (!res->HasError() && res->RowCount() > 0)
+      exists= (res->GetValue(0, 0).GetValue<int64_t>() > 0) ? 1 : 0;
+  }
+  catch (...) {}
+
+  registry_release(db_file);
+  return exists;
+}
+
+static int duckdb_discover_table_names(handlerton *hton, const LEX_CSTRING *db,
+                                       MY_DIR *dir,
+                                       handlerton::discovered_list *result)
+{
+  DBUG_ENTER("duckdb_discover_table_names");
+
+  std::string db_file= std::string(mysql_real_data_home) + "#duckdb/global.duckdb";
+  std::string db_name(db->str, db->length);
+
+  duckdb::DuckDB *duck= registry_get(db_file);
+  if (!duck)
+    DBUG_RETURN(0);  // No DuckDB file yet — return empty, not an error
+
+  try
+  {
+    duckdb::Connection conn(*duck);
+    std::string sql=
+      "SELECT table_name FROM information_schema.tables "
+      "WHERE table_schema = '" + db_name + "' "
+      "AND table_schema NOT IN ('information_schema', 'pg_catalog', 'main')";
+
+    auto res= conn.Query(sql);
+    if (!res->HasError())
+    {
+      for (size_t i= 0; i < res->RowCount(); i++)
+      {
+        std::string name= res->GetValue(0, i).ToString();
+        result->add_table(name.c_str(), name.length());
+      }
+    }
+  }
+  catch (...) {}
+
+  registry_release(db_file);
+  DBUG_RETURN(0);
 }
 
 static int duckdb_discover_table(handlerton *hton, THD *thd, TABLE_SHARE *share)
@@ -554,12 +624,6 @@ int ha_duckdb::create(const char *name, TABLE *table_arg,
   duckdb_table_name= p.qualified_table;
   db_name=           p.db_name;
 
-  // Tables prefixed with "v_" are view stubs — MariaDB registers the name
-  // in its catalog but DuckDB already has the view defined in
-  // holyduck_duckdb_extensions.sql. Skip DuckDB CREATE TABLE so the view
-  // is not overwritten with an empty base table.
-  if (p.table_name.substr(0, 2) == "v_")
-    DBUG_RETURN(0);
 
   if (ensure_duckdb_dir())
     DBUG_RETURN(1);
