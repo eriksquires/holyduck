@@ -1,12 +1,60 @@
-# HolyDuck vs AliSQL DuckDB Plugin
+# HolyDuck Plugin vs AliSQL
 
-This document compares HolyDuck (`ha_duckdb` for MariaDB) with the DuckDB storage
-engine plugin included in Alibaba's AliSQL (a MySQL fork). It was written in response
-to a claim that HolyDuck is a clone of the AliSQL implementation.
+This document compares HolyDuck with [Alibaba's AliSQL (a MySQL fork)](https://github.com/alibaba/AliSQL). It was written in response to a suggestion that HolyDuck is a clone of the AliSQL implementation.
 
-**Conclusion up front: they are not clones.** They are two independent implementations
-of the same concept — DuckDB as a MySQL/MariaDB storage engine — with fundamentally
-different architectures and different design goals.
+**We do not believe HolyDuck is a clone of AliSQL at all, nor is it derived from their DuckDB integration work.** They are two independent implementations in a similar problem space — DuckDB as a MySQL/MariaDB storage engine — with fundamentally
+different architectures and different design goals and no shared code.  
+
+HolyDuck has no content that is derived from AliSQL code.   At almost every important place HolyDuck behaves fundamentally differently and the opportunity to cut/paste code from AliSQL just isn't there. 
+
+## Code Base
+
+Lets spell out the big overarching and fundamental difference in these two products: 
+
+**AliSQL** is a MySQL 8 fork with DuckDB inside it. 
+
+**HolyDuck** is an engine plugin for DuckDB with a 9 MB binary for MariaDB 11.8.3.   
+
+One big obvious way to see differences is in what is in the public repo of each. As of March 24, 2026: 
+
+|                               | AliSQL                                   | HolyDuck                           |
+| ----------------------------- | ---------------------------------------- | ---------------------------------- |
+| Base                          | MySQL 8.0.44 fork                        | MariaDB plugin (standalone)        |
+| Source Files to Build         | ~ 49,000                                 | 2                                  |
+| Source code lines             | ~12.4 million                            | 3,271                              |
+| DuckDB-specific source files  | 35                                       | 2                                  |
+| DuckDB-specific lines of code | 9,244                                    | 3,271                              |
+| DuckDB code as % of total     | ~0.3% of a full server fork              | 100% — it's the whole project      |
+| Fork required                 | Yes                                      | No — drops into unmodified MariaDB |
+
+
+---
+
+## Fundamentally Different Operation and Goals
+
+Just looking at the DuckDB specific code lines you can see HolyDuck is 1/3 the size.   However one could reasonably ask:  did we lift any code from AliSQL for our work? No.  
+
+We get into details here.
+
+**AliSQL's DuckDB integration is HTAP** — Hybrid Transactional/Analytical Processing.
+The design goal is to give you real-time analytical reads on your *existing* InnoDB data
+without changing your schema. InnoDB remains the source of truth; DuckDB receives a
+live mirror via binlog replication. You don't choose which tables are DuckDB — AliSQL
+can convert all your InnoDB tables automatically and replay writes into DuckDB at
+~300K rows/s. It supports three deployment models: standalone DuckDB instance,
+one-click InnoDB-to-DuckDB conversion, and a dedicated DuckDB replica node that
+mirrors a standard MySQL primary via binlog.
+
+**HolyDuck is an explicit analytical store.** You decide which tables are `ENGINE=DUCKDB`
+and which are `ENGINE=InnoDB`. There is no automatic mirroring or binlog replication.
+The value proposition is different: rather than giving you analytics on data you already
+have in InnoDB, HolyDuck gives you a high-performance columnar store for data you
+*choose* to land there — ETL outputs, aggregated results, large fact tables — while
+letting you join freely against InnoDB dimension tables without leaving MariaDB.
+
+In short: AliSQL asks *"how do we make your InnoDB data queryable analytically?"*
+HolyDuck asks *"how do we make DuckDB a first-class citizen inside MariaDB?"*
+These are different questions with different answers.
 
 ---
 
@@ -15,8 +63,7 @@ different architectures and different design goals.
 The following similarities exist because they are mandated by the MySQL/MariaDB
 storage engine plugin API. Any two independent implementations would share them:
 
-- **File names** `ha_duckdb.h` / `ha_duckdb.cc` — the `ha_<engine>.{h,cc}` naming
-  convention is required by MariaDB/MySQL for all storage engine handlers.
+- **File names** `ha_duckdb.h` / `ha_duckdb.cc` — the `ha_<engine>.{h,cc}` naming convention is required by MariaDB/MySQL for all storage engine handlers.  Honestly I grant you we may have identical file names, kind of unavoidable. 
 - **Class declaration** `class ha_duckdb : public handler` — the base class and name
   are dictated by the plugin API.
 - **Standard handler methods** (`rnd_init`, `rnd_next`, `write_row`, `create`,
@@ -114,19 +161,6 @@ instance and per-thread connections maintained in the MySQL `THD` context
 | SQL rewriting | Macro system + targeted rewrite pass | Explicit DDL/DML convertor classes |
 | Multiple databases | Yes — registry keyed on file path | No — single global DuckDB instance |
 | Primary use case | Analytics pushdown; mixed OLAP/OLTP queries | Full MySQL replacement with columnar storage |
-
----
-
-## On Copyright
-
-AliSQL's DuckDB plugin files carry Alibaba's standard GPL v2 header. Notably,
-DuckDB's MIT license copyright notice does not appear in AliSQL's source headers —
-the DuckDB library lives in `extra/duckdb/` and carries its own license there.
-
-HolyDuck includes `THIRD_PARTY_NOTICES.md` with DuckDB's MIT license reproduced in
-full, as required by the MIT license terms. The source files carry an explicit
-pointer to that notice. This is more strictly compliant with DuckDB's MIT license
-attribution requirement than AliSQL's approach.
 
 ---
 
