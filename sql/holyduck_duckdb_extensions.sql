@@ -47,12 +47,21 @@ CREATE OR REPLACE MACRO from_unixtime(n) AS make_timestamp(n::BIGINT * 1000000);
 -- ---------------------------------------------------------------------------
 
 -- MariaDB: DATEDIFF(date1, date2)  →  days between date1 and date2
--- DuckDB's datediff() takes an explicit unit and reversed arg order.
-CREATE OR REPLACE MACRO datediff(d1, d2) AS datediff('day', d2::DATE, d1::DATE);
+-- Implemented as DATE subtraction to avoid shadowing the 3-arg DuckDB
+-- built-in datediff() — a same-named 2-arg macro calling datediff(...) would
+-- resolve to itself and fail to bind at CREATE time.
+CREATE OR REPLACE MACRO datediff(d1, d2) AS (d1::DATE - d2::DATE)::INTEGER;
+
+-- MariaDB: TO_DAYS(date)  →  days since a fixed reference point
+-- MariaDB internally rewrites DATEDIFF(a, b) to TO_DAYS(a) - TO_DAYS(b) before
+-- pushdown, so DuckDB needs this macro even though DATEDIFF itself is not pushed.
+-- We anchor to the Unix epoch (1970-01-01); the absolute value differs from
+-- MySQL's year-0 reference, but differences are correct (the offset cancels).
+CREATE OR REPLACE MACRO to_days(d) AS (d::DATE - '1970-01-01'::DATE)::INTEGER;
 
 -- MariaDB: LAST_DAY(date)  →  the last calendar day of that month
 CREATE OR REPLACE MACRO last_day(d) AS
-    (date_trunc('month', d::DATE) + INTERVAL 1 MONTH - INTERVAL 1 DAY)::DATE;
+    (date_trunc('month', d::DATE) + INTERVAL '1 month' - INTERVAL '1 day')::DATE;
 
 -- ---------------------------------------------------------------------------
 -- String functions

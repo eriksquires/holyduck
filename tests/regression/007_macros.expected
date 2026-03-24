@@ -1,0 +1,2 @@
+ifnull_null	ifnull_notnull	date_format_ymd	unix_ts	from_unixtime_date	datediff_days	last_day_feb	locate_pos	mid_bcd	space_len	strcmp_lt	strcmp_eq	strcmp_gt	regexp_first_word	find_banana	find_missing	round_300s	if_true	if_false
+fallback	value	2026-03-15	1767225600	2025-01-01	73	2026-02-28	7	bcd	5	-1	0	1	Hello	2	0	2026-03-15 10:30:00	yes	no

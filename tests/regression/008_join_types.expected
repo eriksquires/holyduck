@@ -1,0 +1,32 @@
+name	sales_count	total
+Clothing	2	450
+Electronics	3	475
+Food	1	250
+order_id	amount	category
+1	100.000	Electronics
+2	200.000	Electronics
+3	150.000	Clothing
+4	300.000	Clothing
+5	250.000	Food
+6	175.000	Electronics
+name	sales_count
+Clothing	2
+Electronics	3
+Food	1
+product	region
+Apple	East
+Apple	North
+Apple	South
+Laptop	East
+Laptop	North
+Laptop	South
+Phone	East
+Phone	North
+Phone	South
+T-Shirt	East
+T-Shirt	North
+T-Shirt	South
+region	total
+East	475
+North	250
+South	450

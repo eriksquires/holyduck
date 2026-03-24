@@ -1,9 +1,22 @@
 -- Regression test database setup.
 -- Run once before the test suite; teardown.sql drops it.
-
+--
+-- DuckDB tables live in global.duckdb and survive DROP DATABASE.
+-- DROP TABLE IF EXISTS only works when a MariaDB frm file is present, so
+-- we drop them directly via DuckDB to handle stale state from prior runs.
+SET GLOBAL duckdb_execute_sql = 'DROP TABLE IF EXISTS "hd_regression"."macro_inputs"';
+SET GLOBAL duckdb_execute_sql = 'DROP TABLE IF EXISTS "hd_regression"."products"';
+SET GLOBAL duckdb_execute_sql = 'DROP TABLE IF EXISTS "hd_regression"."sales"';
 DROP DATABASE IF EXISTS hd_regression;
+FLUSH TABLES;
+
 CREATE DATABASE hd_regression;
 USE hd_regression;
+
+-- HolyDuck MariaDB-side stored functions (needed for parser acceptance + InnoDB fallback)
+CREATE FUNCTION IF NOT EXISTS RoundDateTime(dt DATETIME, bucket_secs INT)
+RETURNS DATETIME DETERMINISTIC
+RETURN FROM_UNIXTIME(FLOOR(UNIX_TIMESTAMP(dt) / bucket_secs) * bucket_secs);
 
 -- InnoDB dimension tables
 CREATE TABLE categories (id INT PRIMARY KEY, name VARCHAR(50)) ENGINE=InnoDB;
@@ -36,3 +49,23 @@ CREATE TABLE products (
 ) ENGINE=DUCKDB;
 
 INSERT INTO products VALUES (1,'Laptop',1),(2,'T-Shirt',2),(3,'Apple',3),(4,'Phone',1);
+
+-- Single-row DuckDB table for macro regression tests.
+-- Values chosen to give deterministic, easy-to-verify outputs.
+CREATE TABLE macro_inputs (
+    dt        DATETIME,
+    dt2       DATETIME,
+    str1      VARCHAR(50),
+    str2      VARCHAR(50),
+    csv_list  VARCHAR(50),
+    n         INT
+) ENGINE=DUCKDB;
+
+INSERT INTO macro_inputs VALUES (
+    '2026-03-15 10:30:00',  -- dt:  reference datetime
+    '2026-01-01 00:00:00',  -- dt2: for datediff (73 days before dt)
+    'Hello World',          -- str1
+    'abcdef',               -- str2
+    'apple,banana,cherry',  -- csv_list
+    300                     -- n: bucket size in seconds / space count
+);

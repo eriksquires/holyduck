@@ -2,11 +2,20 @@
 #define HA_DUCKDB_INCLUDED
 
 /*
-   Copyright (c) 2026, DuckDB Storage Engine for MariaDB
+   Copyright (c) 2026, Erik Squires
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
    the Free Software Foundation; version 2 of the License.
+
+   This program is distributed in the hope that it will be useful,
+   but WITHOUT ANY WARRANTY; without even the implied warranty of
+   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+   GNU General Public License for more details.
+
+   HolyDuck embeds DuckDB (MIT License, copyright Stichting DuckDB Foundation)
+   and uses the MariaDB Server plugin API (GPL v2, copyright MariaDB Foundation).
+   See THIRD_PARTY_NOTICES.md for full third-party license text.
 */
 
 #ifdef USE_PRAGMA_INTERFACE

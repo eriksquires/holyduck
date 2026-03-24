@@ -23,7 +23,7 @@ for arg in "$@"; do
   esac
 done
 
-MARIADB="docker exec ${CONTAINER} mariadb -uroot -ptestpass --ssl=0 --batch"
+MARIADB="docker exec -i ${CONTAINER} mariadb -uroot -ptestpass --ssl=0 --batch"
 
 GREEN='\033[0;32m'; RED='\033[0;31m'; YELLOW='\033[1;33m'; NC='\033[0m'
 pass() { echo -e "${GREEN}  PASS${NC}  $*"; }
@@ -32,7 +32,7 @@ info() { echo -e "${YELLOW}  ----${NC}  $*"; }
 
 # ── Setup ────────────────────────────────────────────────────────────────────
 info "Setting up regression database..."
-${MARIADB} < "${SCRIPT_DIR}/setup.sql" 2>/dev/null
+${MARIADB} < "${SCRIPT_DIR}/setup.sql"
 echo
 
 # ── Run tests ────────────────────────────────────────────────────────────────
@@ -75,7 +75,7 @@ done
 # ── Teardown ─────────────────────────────────────────────────────────────────
 echo
 info "Tearing down regression database..."
-${MARIADB} < "${SCRIPT_DIR}/teardown.sql" 2>/dev/null
+${MARIADB} < "${SCRIPT_DIR}/teardown.sql"
 
 # ── Summary ──────────────────────────────────────────────────────────────────
 echo

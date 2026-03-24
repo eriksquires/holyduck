@@ -1,3 +1,20 @@
+/*
+   Copyright (c) 2026, Erik Squires
+
+   This program is free software; you can redistribute it and/or modify
+   it under the terms of the GNU General Public License as published by
+   the Free Software Foundation; version 2 of the License.
+
+   This program is distributed in the hope that it will be useful,
+   but WITHOUT ANY WARRANTY; without even the implied warranty of
+   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+   GNU General Public License for more details.
+
+   HolyDuck embeds DuckDB (MIT License, copyright Stichting DuckDB Foundation)
+   and uses the MariaDB Server plugin API (GPL v2, copyright MariaDB Foundation).
+   See THIRD_PARTY_NOTICES.md for full third-party license text.
+*/
+
 #define MYSQL_SERVER 1
 #include "ha_duckdb.h"
 #include "probes_mysql.h"
@@ -2101,19 +2118,145 @@ static void strip_schema_for_table(std::string &sql, const std::string &tname)
 // semantically identical to the original INNER JOIN.
 static std::string fix_bare_joins(const std::string &sql)
 {
-  try
-  {
-    // Matches: JOIN <"schema"."table"> or <"table">, optional <"alias">,
-    // whitespace, then something that is NOT "on" or "using".
-    static const std::regex bare_join(
-      R"((\bjoin\s+(?:"[^"]*"\."[^"]*"|"[^"]*")(?:\s+"[^"]*")?)(\s+)(?!on\b|using\b))",
-      std::regex_constants::icase);
-    return std::regex_replace(sql, bare_join, "$1$2ON TRUE ");
+  // Scan for JOIN keywords where the table reference is not followed by ON or
+  // USING — MariaDB's derived/CTE printer moves INNER JOIN conditions to WHERE,
+  // producing "JOIN table WHERE ..." which DuckDB rejects.  We insert ON TRUE
+  // to satisfy DuckDB's parser while preserving the WHERE semantics.
+  //
+  // Uses a simple character scanner instead of regex to avoid backtracking
+  // ambiguity with optional table aliases.  Skips over quoted identifiers and
+  // string literals so embedded SQL keywords don't cause false matches.
+  //
+  // CROSS JOIN and NATURAL JOIN never have ON/USING and are left untouched.
+
+  const size_t n = sql.size();
+  std::string out;
+  out.reserve(n + 64);
+  size_t i = 0;
+
+  // Skip a double-quoted identifier (handles "" escaping).
+  auto skip_quoted_id = [&](size_t pos) -> size_t {
+    if (pos >= n || sql[pos] != '"') return pos;
+    for (++pos; pos < n; ++pos) {
+      if (sql[pos] != '"') continue;
+      if (++pos < n && sql[pos] == '"') continue;  // "" escape
+      break;
+    }
+    return pos;
+  };
+
+  // Case-insensitive keyword check: sql[pos..] == kw (kw must be lowercase),
+  // followed by a non-identifier character or end of string.
+  auto is_kw = [&](size_t pos, const char *kw) -> bool {
+    for (size_t k = 0; kw[k]; ++k, ++pos) {
+      if (pos >= n || tolower((unsigned char)sql[pos]) != (unsigned char)kw[k])
+        return false;
+    }
+    return pos >= n || !(isalnum((unsigned char)sql[pos]) || sql[pos] == '_');
+  };
+
+  // Return the last non-whitespace keyword in out (lowercase), used to detect
+  // CROSS or NATURAL preceding the JOIN keyword.
+  auto last_kw_in_out = [&]() -> std::string {
+    size_t j = out.size();
+    while (j > 0 && isspace((unsigned char)out[j - 1])) --j;
+    size_t end = j;
+    while (j > 0 && isalpha((unsigned char)out[j - 1])) --j;
+    if (j == end) return "";
+    std::string kw = out.substr(j, end - j);
+    for (char &c : kw) c = (char)tolower((unsigned char)c);
+    return kw;
+  };
+
+  while (i < n) {
+    // Pass through single-quoted string literals without scanning inside them.
+    if (sql[i] == '\'') {
+      out += sql[i++];
+      while (i < n) {
+        char c = sql[i++];
+        out += c;
+        if (c == '\'') {
+          if (i < n && sql[i] == '\'') out += sql[i++];  // '' escape
+          else break;
+        }
+      }
+      continue;
+    }
+
+    // Pass through double-quoted identifiers without scanning inside them.
+    if (sql[i] == '"') {
+      size_t end = skip_quoted_id(i);
+      out.append(sql, i, end - i);
+      i = end;
+      continue;
+    }
+
+    // Not a JOIN keyword — emit character and continue.
+    if (!is_kw(i, "join")) {
+      out += sql[i++];
+      continue;
+    }
+
+    // ── JOIN keyword found ───────────────────────────────────────────────────
+
+    // CROSS JOIN and NATURAL JOIN never take ON/USING — skip them.
+    std::string prev = last_kw_in_out();
+    if (prev == "cross" || prev == "natural") {
+      out += sql[i++];
+      continue;
+    }
+
+    // 1. Emit "JOIN" (preserve original case, always 4 chars).
+    out.append(sql, i, 4);
+    i += 4;
+
+    // 2. Emit whitespace after JOIN.
+    while (i < n && isspace((unsigned char)sql[i]))
+      out += sql[i++];
+
+    // 3. Emit table name: optional "schema". prefix + "table".
+    if (i < n && sql[i] == '"') {
+      size_t end = skip_quoted_id(i);
+      out.append(sql, i, end - i);
+      i = end;
+      if (i < n && sql[i] == '.') {
+        out += sql[i++];
+        end = skip_quoted_id(i);
+        out.append(sql, i, end - i);
+        i = end;
+      }
+    }
+
+    // 4. Emit optional alias: a quoted identifier not immediately followed
+    //    by '.' (which would indicate another schema.table, not an alias).
+    {
+      size_t j = i;
+      while (j < n && isspace((unsigned char)sql[j])) ++j;
+      if (j < n && sql[j] == '"') {
+        size_t alias_end = skip_quoted_id(j);
+        if (alias_end >= n || sql[alias_end] != '.') {
+          out.append(sql, i, alias_end - i);  // whitespace + alias
+          i = alias_end;
+        }
+      }
+    }
+
+    // 5. Emit whitespace before the next keyword.
+    {
+      size_t ws = i;
+      while (i < n && isspace((unsigned char)sql[i])) ++i;
+      out.append(sql, ws, i - ws);
+    }
+
+    // 6. If the next token is not ON or USING, insert ON TRUE.
+    if (!is_kw(i, "on") && !is_kw(i, "using"))
+      out += "ON TRUE ";
+
+    // Continue — the next token (ON/USING/WHERE/etc.) is emitted by the
+    // normal path on the next iteration.
   }
-  catch (const std::regex_error &)
-  {
-    return sql;
-  }
+
+  return out;
 }
 
 static std::string rewrite_mariadb_sql(const std::string &sql)
@@ -2164,6 +2307,15 @@ static std::string rewrite_mariadb_sql(const std::string &sql)
   return s;
 }
 
+// Forward declarations for injection helpers defined later in this file.
+static std::string extract_missing_table(const std::string &errmsg);
+static TABLE      *find_open_table_by_name(THD *thd, const std::string &name);
+static With_element *find_cte_by_name(THD *thd, const std::string &name);
+static bool inject_table_into_duckdb(duckdb::Connection *conn, TABLE *table,
+                                     const std::string &temp_name);
+static bool inject_cte_into_duckdb(duckdb::Connection *conn, THD *thd,
+                                   With_element *cte, const std::string &temp_name);
+
 // ---------------------------------------------------------------------------
 // Select handler — full query pushdown
 // ---------------------------------------------------------------------------
@@ -2173,23 +2325,24 @@ static select_handler *create_duckdb_select_handler(THD *thd, SELECT_LEX *sel,
 {
   if (!sel) return nullptr;
 
-  // Only push down if every leaf table uses the DUCKDB engine
-  List_iterator<TABLE_LIST> it(sel->leaf_tables);
-  TABLE_LIST *tl;
-  while ((tl= it++))
+  // Require at least one DuckDB leaf (to identify the database and connection).
+  // Non-DuckDB leaves (InnoDB or CTE-backed) are injectable at runtime by
+  // init_scan, matching the same policy as create_duckdb_derived_handler.
+  TABLE_LIST *duckdb_leaf= nullptr;
   {
-    if (!tl->table || tl->table->file->ht != duckdb_hton)
-      return nullptr;
+    List_iterator<TABLE_LIST> it(sel->leaf_tables);
+    TABLE_LIST *tl;
+    while ((tl= it++))
+    {
+      if (!tl->table)
+        continue;
+      if (tl->table->file->ht == duckdb_hton && !duckdb_leaf)
+        duckdb_leaf= tl;
+    }
   }
+  if (!duckdb_leaf) return nullptr;
 
-  // All tables are DUCKDB — get the db file path from the first table
-  List_iterator<TABLE_LIST> it2(sel->leaf_tables);
-  TABLE_LIST *first= it2++;
-  if (!first || !first->table)
-    return nullptr;
-
-  // Extract db file path via the handler
-  ha_duckdb *h= static_cast<ha_duckdb*>(first->table->file);
+  ha_duckdb *h= static_cast<ha_duckdb*>(duckdb_leaf->table->file);
   if (h->db_file_path.empty())
     return nullptr;
 
@@ -2243,27 +2396,106 @@ int ha_duckdb_select_handler::init_scan()
   // Rewrite MariaDB function names that can't be handled by macros.
   sql= rewrite_mariadb_sql(sql);
 
-  try
+  // Inject all non-DuckDB leaf tables (InnoDB, CTE-backed) into DuckDB as
+  // TEMP TABLEs so the full query — including ORDER BY, GROUP BY, HAVING —
+  // executes entirely inside DuckDB without any MariaDB-side row operations.
   {
-    register_active_connection(thd, connection);
-    auto r= connection->Query(sql);
-    unregister_active_connection(thd);
-    if (r->HasError())
+    SELECT_LEX *sel= select_lex;
+    if (sel)
     {
-      sql_print_error("DuckDB pushdown: query failed: %s\nSQL: %s",
-                      r->GetErrorObject().Message().c_str(), sql.c_str());
+      List_iterator<TABLE_LIST> it(sel->leaf_tables);
+      TABLE_LIST *tl;
+      while ((tl= it++))
+      {
+        if (!tl->table || tl->table->file->ht == duckdb_hton)
+          continue;
+
+        std::string tname(tl->table->s->table_name.str);
+        bool ok= false;
+        if (tl->with)
+          ok= inject_cte_into_duckdb(connection, thd, tl->with, tname);
+        else
+          ok= inject_table_into_duckdb(connection, tl->table, tname);
+
+        if (ok)
+          strip_schema_for_table(sql, tname);
+        else
+          sql_print_warning("DuckDB select: pre-inject '%s' failed; retry loop will handle it",
+                            tname.c_str());
+      }
+    }
+  }
+
+  // Fix bare JOINs: MariaDB's printer emits CROSS JOIN and bare INNER JOINs
+  // without ON clauses in both the derived and select paths.  The new parser-
+  // based fix_bare_joins handles aliases correctly and is safe to apply here.
+  sql= fix_bare_joins(sql);
+
+  // Retry loop: handles tables not visible in leaf_tables (e.g. subquery aliases).
+  for (int attempt= 0; attempt < 8; attempt++)
+  {
+    std::unique_ptr<duckdb::MaterializedQueryResult> r;
+    try
+    {
+      register_active_connection(thd, connection);
+      r= connection->Query(sql);
+      unregister_active_connection(thd);
+    }
+    catch (const std::exception &e)
+    {
+      unregister_active_connection(thd);
+      sql_print_error("DuckDB select pushdown exception: %s", e.what());
       return 1;
     }
-    result= r.release();
-    current_row= 0;
-  }
-  catch (const std::exception &e)
-  {
-    unregister_active_connection(thd);
-    sql_print_error("DuckDB pushdown: exception: %s", e.what());
+
+    if (!r->HasError())
+    {
+      result= r.release();
+      current_row= 0;
+      return 0;
+    }
+
+    std::string errmsg= r->GetErrorObject().Message();
+    std::string missing= extract_missing_table(errmsg);
+
+    if (missing.empty())
+    {
+      sql_print_error("DuckDB select pushdown failed: %s\nSQL: %s",
+                      errmsg.c_str(), sql.c_str());
+      return 1;
+    }
+
+    TABLE *open_tbl= find_open_table_by_name(thd, missing);
+    if (open_tbl)
+    {
+      if (!inject_table_into_duckdb(connection, open_tbl, missing))
+      {
+        sql_print_error("DuckDB select pushdown: failed to inject table '%s'", missing.c_str());
+        return 1;
+      }
+      strip_schema_for_table(sql, missing);
+      continue;
+    }
+
+    With_element *cte= find_cte_by_name(thd, missing);
+    if (cte)
+    {
+      if (!inject_cte_into_duckdb(connection, thd, cte, missing))
+      {
+        sql_print_error("DuckDB select pushdown: failed to inject CTE '%s'", missing.c_str());
+        return 1;
+      }
+      strip_schema_for_table(sql, missing);
+      continue;
+    }
+
+    sql_print_error("DuckDB select pushdown: unresolvable table '%s'\nFull error: %s\nSQL: %s",
+                    missing.c_str(), errmsg.c_str(), sql.c_str());
     return 1;
   }
-  return 0;
+
+  sql_print_error("DuckDB select pushdown: exceeded retry limit\nSQL: %s", sql.c_str());
+  return 1;
 }
 
 int ha_duckdb_select_handler::next_row()

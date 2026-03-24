@@ -117,13 +117,27 @@ See [BUILDING.md](BUILDING.md) for the full build workflow — Docker base image
 
 ## License
 
-This project is dual-licensed:
+Copyright (c) 2026, Erik Squires. This project is dual-licensed:
 
 - **[GPL v2](LICENSE)** — free to use under the terms of the GNU General Public License v2.
   Any derivative works must also be GPL v2.
 - **[Commercial License](LICENSE-COMMERCIAL)** — for use in proprietary or closed-source
   products without GPL obligations. Contact via [GitHub](https://github.com/eriksquires).
 
+## Third-Party Software
+
+HolyDuck is built on the shoulders of two exceptional projects:
+
+**[DuckDB](https://duckdb.org/)** — embedded analytical database engine.
+Copyright 2018-2024 Stichting DuckDB Foundation. Licensed under the
+[MIT License](https://github.com/duckdb/duckdb/blob/main/LICENSE).
+
+**[MariaDB Server](https://mariadb.org/)** — relational database server and plugin API.
+Copyright MariaDB Foundation and contributors. Licensed under the
+[GNU General Public License v2](https://www.gnu.org/licenses/old-licenses/gpl-2.0.html).
+
+Full license texts for all third-party components are in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+
 ## Acknowledgements
 
-Clearly this project being just a shim between two data stores could not exist without the hard work and excellent contributions of the [DuckDB](https://duckdb.org/) and [MariaDB Foundation](https://mariadb.org/) teams and all those who have contributed before.  
+This project is essentially a shim between two exceptional data stores — it could not exist without the hard work of the [DuckDB](https://duckdb.org/) and [MariaDB Foundation](https://mariadb.org/) teams and everyone who has contributed to both projects.
