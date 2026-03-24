@@ -148,6 +148,12 @@ databases — stop MariaDB first, do the work with any DuckDB client, then bring
 
 ## System Variables
 
+Because MariaDB doesn't have any way to expose DuckDB methods directly we're cheating and using the SET GLOBAL variables as 
+functions to let you administer DuckDB without restarting MariaDB.  The most useful one is  `SET GLOBAL duckdb_reload_extensions=1`
+which will reload the extensions file on the fly. 
+
+Here is the complete list:
+
 | Variable | Type | Description |
 |---|---|---|
 | `duckdb_max_threads` | ULONG | Max CPU threads DuckDB may use (0 = all cores) |
