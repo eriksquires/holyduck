@@ -63,12 +63,12 @@ These are different questions with different answers.
 
 ### Mixed-Engine Query Handling
 
-As we alluded to at the start, the choice of whether to support mixed-engine joins or not drives most of the feature divergence between the two projects.  How we handle these cases is where all the interesting parts of HolyDuck are.
+As we alluded to at the start, the choice of whether to support mixed-engine joins or not drives most of the feature divergence between the two projects. 
 
 **HolyDuck** handles mixed DuckDB + InnoDB queries by injecting InnoDB tables into
 DuckDB as temporary tables at query time, then pushing the entire query — including
 the join, aggregation, and ordering — to DuckDB. Mixed-engine analytical queries
-run at full DuckDB speed.
+run very quickly.  How we achieve this is the most interesting part of this project.
 
 **AliSQL** does not support mixed-engine joins — by design. At startup, a
 `convert_all_to_duckdb_at_start` option permanently converts every user table to
