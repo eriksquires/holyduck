@@ -78,7 +78,7 @@ The two implementations differ fundamentally in how they use DuckDB.
 
 ### Mixed-Engine Query Handling
 
-AliSQL is architecturally designed to eliminate mixed-engine queries entirely — on an analytical replica, all user tables are converted to DuckDB at startup, so the problem never arises. HolyDuck takes the opposite approach: it assumes only some tables will be in DuckDB and tackles mixed-engine joins head on. This single architectural difference drives most of the feature divergence between the two projects.  This is both a large contributor to HolyDuck's code size but also where all the interesting parts are. 
+**AliSQL is architecturally designed to eliminate mixed-engine queries entirely** — on an analytical replica, all user tables are converted to DuckDB at startup, so the problem never arises. HolyDuck takes the opposite approach: it assumes only some tables will be in DuckDB and tackles mixed-engine joins head on. This single architectural difference drives most of the feature divergence between the two projects.  This is both a large contributor to HolyDuck's code size but also where all the interesting parts are. 
 
 **HolyDuck** handles mixed DuckDB + InnoDB queries by injecting InnoDB tables into
 DuckDB as temporary tables at query time, then pushing the entire query — including
