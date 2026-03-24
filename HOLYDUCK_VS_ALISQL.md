@@ -2,10 +2,9 @@
 
 This document compares HolyDuck with [Alibaba's AliSQL (a MySQL fork)](https://github.com/alibaba/AliSQL). It was written in response to a suggestion that HolyDuck is a clone of the AliSQL implementation.
 
-**We do not believe HolyDuck is a clone of AliSQL at all, nor is it derived from their DuckDB integration work.** They are two independent implementations in a similar problem space — DuckDB as a MySQL/MariaDB storage engine — with fundamentally
-different architectures and different design goals and no shared code.  
+**HolyDuck is an independent implementation and has no code derived from AliSQL.** They are two independent implementations in a similar problem space — DuckDB as a MySQL/MariaDB storage engine — with fundamentally different architectures and different design goals and no shared code.  
 
-HolyDuck has no content that is derived from AliSQL code.   At almost every important place HolyDuck behaves fundamentally differently and the opportunity to cut/paste code from AliSQL just isn't there. 
+In addition, at almost every important place HolyDuck behaves fundamentally differently and the opportunity to cut/paste code from AliSQL just isn't there.  Not only is the code completely unique but the problems we solve and their solutions are entirely different. 
 
 ## Code Base
 
@@ -31,7 +30,7 @@ One big obvious way to see differences is in what is in the public repo of each.
 
 ## Fundamentally Different Operation and Goals
 
-Just looking at the DuckDB specific code lines you can see HolyDuck is 1/3 the size.   However one could reasonably ask:  did we lift any code from AliSQL for our work? No.  Once you understand the difference in architecture and how we each answer questions about table joins it becomes crystal clear that there's no room for overlap. 
+Once you understand the difference in architecture and how we each answer questions about table joins it becomes crystal clear that there's no room for overlap.
 
 **AliSQL's DuckDB integration is HTAP** — Hybrid Transactional/Analytical Processing.
 The design goal is to give you real-time analytical reads on your *existing* InnoDB data
