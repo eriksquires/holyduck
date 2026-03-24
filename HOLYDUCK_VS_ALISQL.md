@@ -2,9 +2,7 @@
 
 This document compares HolyDuck with [Alibaba's AliSQL (a MySQL fork)](https://github.com/alibaba/AliSQL). It was written in response to a suggestion that HolyDuck is a clone of the AliSQL implementation.
 
-**HolyDuck is an independent implementation and has no code derived from AliSQL.** They are two independent implementations in a similar problem space with fundamentally different architectures and different design goals. 
-
-In addition, at almost every important place HolyDuck behaves fundamentally differently and the opportunity to cut/paste code from AliSQL just isn't there.  Not only is the code completely unique but the problems we solve and their solutions are entirely different. 
+**HolyDuck is an independent implementation and has no code derived from AliSQL.** They are two independent implementations in a similar problem space with fundamentally different architectures and different design goals.  
 
 ## TL;DR
 The best way to describe how these two implement DuckDB differently is with these two facts: 
