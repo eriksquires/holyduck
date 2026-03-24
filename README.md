@@ -2,7 +2,7 @@
 
 *Bringing divine analytical powers to Maria.*
 
-**HolyDuck** (`ha_duckdb`) is a MariaDB storage engine plugin that embeds [DuckDB](https://duckdb.org/) as a first-class DB storage engine next to InnoDB. Create tables with `ENGINE=DUCKDB` and query them with standard SQL — DuckDB handles the heavy lifting.
+**HolyDuck** is a MariaDB storage engine plugin that embeds [DuckDB](https://duckdb.org/) as a first-class DB storage engine next to InnoDB. Create tables with `ENGINE=DUCKDB` and query them with standard SQL — DuckDB handles the heavy lifting.
 
 ## Why
 
@@ -11,7 +11,7 @@ MariaDB is beloved. DuckDB is a miracle of analytical performance and small team
 - Run analytical queries (GROUP BY, aggregations, window functions) at DuckDB speed
 - Mix DuckDB and InnoDB tables in the same query — DuckDB for analytics
 
-HolyDuck is an extremely easy to install, easy to use OLAP engine that lives inside your existing MariaDB data infrastructure.  The speed of a parallel column store database with the convenience of MariaDB with incredibly simple installation. 
+HolyDuck is an extremely easy to install, easy to use OLAP engine that lives inside your existing MariaDB data infrastructure.  The speed of a parallel column store database with the convenience of MariaDB with incredibly simple installation. An ideal solution for small teams living in a MariaDB ecosystem.
 
 We are particularly proud of the performance of mixed-engine joins.  The pain point for any mixed-engine database is joins on tables that come from multiple engines/storage systems.  With a little care in your SQL query and the favor of HolyDuck you can avoid the penalty of bringing large datasets out to MariaDB for row by row joining.
 
@@ -35,11 +35,11 @@ FROM sensors s
 JOIN agg a ON s.id = a.sensor_id;
 ```
 
-EXPLAIN confirms the CTE runs entirely inside DuckDB (`PUSHED DERIVED`), returning a small result for MariaDB to join. See [WRITING_SQL.md](WRITING_SQL.md) for query optimization patterns and pushdown details. For architecture and internals see [INTERNALS.md](INTERNALS.md).
+See [WRITING_SQL.md](WRITING_SQL.md) for query optimization patterns and pushdown details. For architecture and internals see [INTERNALS.md](INTERNALS.md).
 
 ## HolyDuck vs ColumnStore
 
-MariaDB's ColumnStore is the official MariaDB analytical storage engine in this space. Here's how our humble contribution compares:
+MariaDB's ColumnStore is the official enterprise-grade MariaDB analytical storage engine in this space. Here's how our humble contribution compares:
 
 |                           | HolyDuck                          | ColumnStore                          |
 | ------------------------- | --------------------------------- | ------------------------------------ |
@@ -52,29 +52,23 @@ MariaDB's ColumnStore is the official MariaDB analytical storage engine in this 
 
 **HolyDuck's sweet spot:** single-node analytics alongside InnoDB. Big overnight ETL jobs, exploratory data analysis during the day, million-to-billion row scans that return small aggregated results — all without standing up any infrastructure.
 
-One big benefit, if you can live with single writers, is you now have a sharable database with a single source of truth. Also, if you are like me and leave db connections stranded in various places while doing R/Quarto development you'll find yourself spending much less time managing connections in your code.
-
-**ColumnStore's sweet spot:** when you've outgrown a single node and need HA, replication, and multi-server distribution.
-
-If your workload fits on one machine, HolyDuck will likely be faster and infinitely simpler to run.
+If you can live with single writers for your big tables HolyDuck offers you a sharable database with a single source of truth. Also, if you are like me and leave db connections stranded in various places while doing R/Quarto development you'll find yourself spending much less time managing connections in your code.
 
 HolyDuck tables are native DuckDB tables that live and grow in a DuckDB database — no external connections or translations occur.
 
-## HolyDuck vs. Remote Scanning
-
-HolyDuck is the opposite of using Duck's remote scanning features.  While remote scanning works with any table on a remote server, HolyDuck only takes responsibility for tables in DuckDB. 
+**ColumnStore's sweet spot:** when you've outgrown a single node and need HA, replication, and multi-server distribution.
 
 ## DuckDB Limitations
 
 HoldyDuck is much more team friendly in a sense than DuckDB alone but it's a gift, not magic. 
 
-DuckDB does not handle more than one write connection at a time.  HolyDuck does, but the entire engine blocks per write operation.  That is, you and your colleagues can open and access the host MariaDB instance and query all the tables you normally would inside and outside of DuckDB but any DuckDB change operations will block all other DuckDB writers.   This naturally promotes a pattern of using DuckDB for scanning very big tables to create smaller InnoDB which need more frequent edits/refactoring.  
+Alone DuckDB does not handle more than one write connection at a time.  HolyDuck does allows for multiple concurrent users but the entire engine blocks per write operation.  That is, you and your colleagues can open and access the host MariaDB instance and query all the tables you normally would inside and outside of DuckDB but any DuckDB change operations will block all other DuckDB writers.   This naturally promotes a pattern of using DuckDB for scanning very big tables to create smaller InnoDB which need more frequent edits/refactoring.  
 
-Another important limitation is that MariaDB enforces SQL correctness.  You can't run anything against DuckDB that MariaDB won't allow. 
+Another important limitation is that MariaDB enforces it's SQL language idioms.  You can't run anything against DuckDB that MariaDB won't allow. Put on your pirate boots though, we have ways around that.  
 
 ## Installation
 
-Pre-built binaries are available on the [Releases](https://github.com/eriksquires/HolyDuck/releases) page for Ubuntu 22.04, Oracle Linux 8, and Oracle Linux 9.
+Pre-built binaries are available on the [Releases](https://github.com/eriksquires/HolyDuck/releases) page for Ubuntu 22.04 (and Debian 12), Oracle Linux 8 and 9.
 
 ### 1. Find your plugin directory
 
