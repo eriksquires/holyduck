@@ -15,6 +15,8 @@ That really explains everything about how these projects work and why they are s
 
 ## Code Base
 
+The most glaring difference for anyone is the nature of the GitHub projects.  
+
 **AliSQL** is a MySQL 8 fork with DuckDB inside it.
 
 **HolyDuck** is a MariaDB 11.8.3 storage engine plugin with a DuckDB back-end.
@@ -31,6 +33,7 @@ We can start comparing the two projects by looking at what is in the public repo
 | DuckDB code as % of total     | < 0.1%            | 100% — it's the whole project      |
 | Fork required                 | Yes               | No — drops into unmodified MariaDB |
 
+We'll further discuss why code reuse from AliSQL would be counter productive for HolyDuck below. 
 ---
 
 ## Fundamentally Different Operation and Goals
