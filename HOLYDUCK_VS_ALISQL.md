@@ -6,6 +6,13 @@ This document compares HolyDuck with [Alibaba's AliSQL (a MySQL fork)](https://g
 
 In addition, at almost every important place HolyDuck behaves fundamentally differently and the opportunity to cut/paste code from AliSQL just isn't there.  Not only is the code completely unique but the problems we solve and their solutions are entirely different. 
 
+## TL;DR
+The best way I know of to describe how these two implement DuckDB differently is with these two facts: 
+
+**AliSQL** prevents mixed engine table joins.
+
+**HolyDuck** tackles them. 
+
 ## Code Base
 
 Lets spell out the big overarching and fundamental difference in these two products: 
