@@ -59,27 +59,7 @@ These are different questions with different answers.
 
 ---
 
-## Unavoidable Similarities
-
-The following similarities exist because they are mandated by the MySQL/MariaDB
-storage engine plugin API. Any two independent implementations would share them:
-
-- **File names** `ha_duckdb.h` / `ha_duckdb.cc` — the `ha_<engine>.{h,cc}` naming convention is required by MariaDB/MySQL for all storage engine handlers.  
-- **Class declaration** `class ha_duckdb : public handler` — the base class and name
-  are dictated by the plugin API.
-- **Standard handler methods** (`rnd_init`, `rnd_next`, `write_row`, `create`,
-  `external_lock`, etc.) — every storage engine must implement these interfaces.
-- **`handlerton` registration boilerplate** — plugin init/deinit, sysvar registration,
-  and engine capability declarations follow a fixed structure.
-
-These are equivalent to two people writing separate "Hello World" programs and both
-typing `int main()`. It is not copying — it is the interface.
-
----
-
 ## Architectural Differences
-
-The two implementations differ fundamentally in how they use DuckDB.
 
 ### Mixed-Engine Query Handling
 
@@ -155,6 +135,24 @@ instance and per-thread connections maintained in the MySQL `THD` context
 (`thd->get_duckdb_context()`).
 
 ---
+## Unavoidable Similarities
+
+The following similarities exist because they are mandated by the MySQL/MariaDB
+storage engine plugin API. Any two independent implementations would share them:
+
+- **File names** `ha_duckdb.h` / `ha_duckdb.cc` — the `ha_<engine>.{h,cc}` naming convention is required by MariaDB/MySQL for all storage engine handlers.  
+- **Class declaration** `class ha_duckdb : public handler` — the base class and name
+  are dictated by the plugin API.
+- **Standard handler methods** (`rnd_init`, `rnd_next`, `write_row`, `create`,
+  `external_lock`, etc.) — every storage engine must implement these interfaces.
+- **`handlerton` registration boilerplate** — plugin init/deinit, sysvar registration,
+  and engine capability declarations follow a fixed structure.
+
+These are equivalent to two people writing separate "Hello World" programs and both
+typing `int main()`. It is not copying — it is the interface.
+
+---
+
 
 ## Summary Table
 
