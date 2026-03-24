@@ -12,7 +12,7 @@ Lets spell out the big overarching and fundamental difference in these two produ
 
 **AliSQL** is a MySQL 8 fork with DuckDB inside it. 
 
-**HolyDuck** is a storage engine plugin for DuckDB with a 9 MB binary compatible with MariaDB 11.8.3.   
+**HolyDuck** is a MariaDB 11.8.3 storage engine plugin with a DuckDB back-end.
 
 One big obvious way to see differences is in what is in the public repo of each. As of March 24, 2026: 
 
