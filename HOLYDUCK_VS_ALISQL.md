@@ -181,3 +181,6 @@ mixed joins are a non-issue because InnoDB user tables don't exist on that node.
 HolyDuck lives alongside InnoDB on the same instance, uses MariaDB's `select_handler`
 and `derived_handler` APIs for pushdown, and solves the hard problem of mixed-engine
 joins by injecting InnoDB tables into DuckDB at query time.
+
+Ultimately tackling mixed-engine joins should prove to anyone that **HolyDuck** is not
+a clone but an immaculate conception. 
