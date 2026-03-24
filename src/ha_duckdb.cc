@@ -3,6 +3,7 @@
 #include "probes_mysql.h"
 #include "sql_class.h"
 #include "sql_lex.h"
+#include "sql_cte.h"
 #include "key.h"
 
 // DuckDB includes — undef UNKNOWN macro from MariaDB's item_cmpfunc.h
@@ -17,6 +18,7 @@
 #include <map>
 #include <fstream>
 #include <vector>
+#include <regex>
 
 // MariaDB globals
 extern char mysql_real_data_home[];  // absolute path to data directory
@@ -2066,6 +2068,54 @@ static std::string strip_db_qualifier(const std::string &sql)
 }
 
 // Apply all MariaDB→DuckDB function rewrites in one pass.
+// For a specific injected table name, strip any "schema"."tname" occurrence
+// in the SQL down to just "tname".  Injected temp tables are unqualified in
+// DuckDB's temp schema, so the schema prefix must be removed.
+// Column references like "tname"."col" are NOT affected because the lookup
+// pattern is "something"."tname", not "tname"."something".
+static void strip_schema_for_table(std::string &sql, const std::string &tname)
+{
+  const std::string quoted = '"' + tname + '"';
+  size_t pos = 0;
+  while ((pos = sql.find(quoted, pos)) != std::string::npos)
+  {
+    // Check if preceded by ."  (closing quote of a schema name + dot)
+    if (pos >= 2 && sql[pos - 1] == '.' && sql[pos - 2] == '"')
+    {
+      size_t schema_open = sql.rfind('"', pos - 3);
+      if (schema_open != std::string::npos)
+      {
+        sql.erase(schema_open, pos - schema_open);  // remove "schema".
+        pos = schema_open;
+        continue;
+      }
+    }
+    pos += quoted.size();
+  }
+}
+
+// MariaDB's printer moves INNER JOIN ON conditions into the WHERE clause,
+// producing "JOIN table WHERE ..." which DuckDB rejects (it requires ON or USING).
+// Find each bare JOIN (not followed by ON/USING after the table ref) and insert
+// "ON TRUE" so DuckDB treats it as a cross join filtered by the WHERE clause —
+// semantically identical to the original INNER JOIN.
+static std::string fix_bare_joins(const std::string &sql)
+{
+  try
+  {
+    // Matches: JOIN <"schema"."table"> or <"table">, optional <"alias">,
+    // whitespace, then something that is NOT "on" or "using".
+    static const std::regex bare_join(
+      R"((\bjoin\s+(?:"[^"]*"\."[^"]*"|"[^"]*")(?:\s+"[^"]*")?)(\s+)(?!on\b|using\b))",
+      std::regex_constants::icase);
+    return std::regex_replace(sql, bare_join, "$1$2ON TRUE ");
+  }
+  catch (const std::regex_error &)
+  {
+    return sql;
+  }
+}
+
 static std::string rewrite_mariadb_sql(const std::string &sql)
 {
   std::string s= sql;
@@ -2287,6 +2337,227 @@ create_duckdb_unit_handler(THD *thd, SELECT_LEX_UNIT *unit)
 }
 
 // ---------------------------------------------------------------------------
+// Cross-engine injection helpers
+//
+// When the derived-handler pushes a CTE to DuckDB and DuckDB reports a
+// missing table (because the CTE references an InnoDB table or another
+// non-DuckDB CTE), these helpers inject the missing data into the live
+// DuckDB connection as a TEMP TABLE, then the caller retries the query.
+//
+// Injection is transparent: TEMP tables are connection-scoped and are
+// dropped automatically when the derived handler's connection is deleted.
+// ---------------------------------------------------------------------------
+
+// Parse "Table with name 'X' does not exist" from a DuckDB error message.
+// Returns the table name, or "" if the error is not a missing-table error.
+static std::string extract_missing_table(const std::string &errmsg)
+{
+  static const char kPrefix1[] = "Table with name '";
+  size_t pos = errmsg.find(kPrefix1);
+  if (pos != std::string::npos)
+  {
+    pos += sizeof(kPrefix1) - 1;
+    size_t end = errmsg.find('\'', pos);
+    if (end != std::string::npos)
+      return errmsg.substr(pos, end - pos);
+  }
+  static const char kPrefix2[] = "Referenced table \"";
+  pos = errmsg.find(kPrefix2);
+  if (pos != std::string::npos)
+  {
+    pos += sizeof(kPrefix2) - 1;
+    size_t end = errmsg.find('"', pos);
+    if (end != std::string::npos)
+      return errmsg.substr(pos, end - pos);
+  }
+  return "";
+}
+
+// Find an already-open non-DuckDB MariaDB table by its unqualified name.
+// Searches thd->open_tables (all tables opened for the current query).
+static TABLE *find_open_table_by_name(THD *thd, const std::string &name)
+{
+  for (TABLE *t = thd->open_tables; t; t = t->next)
+  {
+    if (t->s && t->s->table_name.str &&
+        name == t->s->table_name.str &&
+        t->file->ht != duckdb_hton)
+      return t;
+  }
+  return nullptr;
+}
+
+// Find a CTE With_element referenced in the current query by name.
+// Scans thd->lex->query_tables — CTE references have tl->with != nullptr.
+static With_element *find_cte_by_name(THD *thd, const std::string &name)
+{
+  for (TABLE_LIST *tl = thd->lex->query_tables; tl; tl = tl->next_global)
+  {
+    if (tl->with &&
+        tl->table_name.str &&
+        name == tl->table_name.str)
+      return tl->with;
+  }
+  return nullptr;
+}
+
+// Inject an already-open MariaDB TABLE into DuckDB as a TEMP TABLE.
+// duck_name is the name DuckDB will see (typically the MariaDB table_name).
+// Uses CREATE TEMP TABLE IF NOT EXISTS so double-injection is harmless.
+static bool inject_table_into_duckdb(duckdb::Connection *conn,
+                                      TABLE *t,
+                                      const std::string &duck_name)
+{
+  // Build CREATE TEMP TABLE with the same schema as the MariaDB table
+  std::ostringstream create_sql;
+  create_sql << "CREATE TEMP TABLE IF NOT EXISTS \"" << duck_name << "\" (";
+  for (uint i = 0; i < t->s->fields; i++)
+  {
+    if (i > 0) create_sql << ", ";
+    create_sql << '"' << t->field[i]->field_name.str << "\" "
+               << field_type_to_duckdb(t->field[i]);
+  }
+  create_sql << ")";
+
+  auto cr = conn->Query(create_sql.str());
+  if (cr->HasError())
+  {
+    sql_print_warning("DuckDB: inject_table CREATE failed for '%s': %s",
+                      duck_name.c_str(),
+                      cr->GetErrorObject().Message().c_str());
+    return false;
+  }
+
+  // Temporarily enable all-column reads so val_int/val_str work for every field
+  MY_BITMAP *saved_read_set = t->read_set;
+  t->read_set = &t->s->all_set;
+
+  bool ok = true;
+  try
+  {
+    duckdb::Appender appender(*conn, duck_name);
+
+    if (t->file->ha_rnd_init(1) != 0)
+    {
+      t->read_set = saved_read_set;
+      return false;
+    }
+
+    int rc;
+    while ((rc = t->file->ha_rnd_next(t->record[0])) == 0)
+    {
+      appender.BeginRow();
+      for (uint i = 0; i < t->s->fields; i++)
+      {
+        Field *f = t->field[i];
+        if (f->is_null())
+        {
+          appender.Append<nullptr_t>(nullptr);
+          continue;
+        }
+        switch (f->type())
+        {
+          case MYSQL_TYPE_TINY:
+          case MYSQL_TYPE_SHORT:
+          case MYSQL_TYPE_LONG:
+          case MYSQL_TYPE_INT24:
+            appender.Append<int32_t>((int32_t)f->val_int());
+            break;
+          case MYSQL_TYPE_LONGLONG:
+            appender.Append<int64_t>(f->val_int());
+            break;
+          case MYSQL_TYPE_FLOAT:
+            appender.Append<float>((float)f->val_real());
+            break;
+          case MYSQL_TYPE_DOUBLE:
+            appender.Append<double>(f->val_real());
+            break;
+          default:
+          {
+            String sv;
+            f->val_str(&sv, &sv);
+            appender.Append(duckdb::Value(std::string(sv.ptr(), sv.length())));
+            break;
+          }
+        }
+      }
+      appender.EndRow();
+    }
+    t->file->ha_rnd_end();
+    appender.Close();
+  }
+  catch (const std::exception &e)
+  {
+    sql_print_warning("DuckDB: inject_table Appender failed for '%s': %s",
+                      duck_name.c_str(), e.what());
+    t->file->ha_rnd_end();
+    ok = false;
+  }
+
+  t->read_set = saved_read_set;
+  return ok;
+}
+
+// Inject a CTE into DuckDB as a TEMP TABLE.
+// First pre-injects any non-DuckDB leaf tables that the CTE body references,
+// then executes CREATE TEMP TABLE name AS (cte_sql) in DuckDB.
+static bool inject_cte_into_duckdb(duckdb::Connection *conn, THD *thd,
+                                    With_element *cte,
+                                    const std::string &cte_name);
+
+static bool inject_cte_into_duckdb(duckdb::Connection *conn, THD *thd,
+                                    With_element *cte,
+                                    const std::string &cte_name)
+{
+  // Pre-inject leaf tables so the CREATE TEMP TABLE AS (...) will succeed
+  SELECT_LEX *cte_sel = cte->spec->first_select();
+  if (cte_sel)
+  {
+    List_iterator<TABLE_LIST> it(cte_sel->leaf_tables);
+    TABLE_LIST *tl;
+    while ((tl = it++))
+    {
+      if (!tl->table || tl->table->file->ht == duckdb_hton)
+        continue;  // skip DuckDB tables
+
+      std::string leaf_name = tl->table->s->table_name.str;
+
+      if (tl->with)
+      {
+        // Leaf is itself a CTE — recurse
+        if (!inject_cte_into_duckdb(conn, thd, tl->with, leaf_name))
+          return false;
+      }
+      else
+      {
+        if (!inject_table_into_duckdb(conn, tl->table, leaf_name))
+          return false;
+      }
+    }
+  }
+
+  // Now materialize the CTE body into a DuckDB temp table
+  String spec_str;
+  cte->spec->print(&spec_str, QT_ORDINARY);
+  std::string cte_sql(spec_str.ptr(), spec_str.length());
+  for (char &c : cte_sql) if (c == '`') c = '"';
+  cte_sql = rewrite_mariadb_sql(cte_sql);
+
+  std::string create_sql =
+    "CREATE TEMP TABLE IF NOT EXISTS \"" + cte_name + "\" AS (" + cte_sql + ")";
+  auto r = conn->Query(create_sql);
+  if (r->HasError())
+  {
+    sql_print_warning("DuckDB: inject_cte failed for '%s': %s\nSQL: %s",
+                      cte_name.c_str(),
+                      r->GetErrorObject().Message().c_str(),
+                      create_sql.c_str());
+    return false;
+  }
+  return true;
+}
+
+// ---------------------------------------------------------------------------
 // Derived table pushdown handler
 // ---------------------------------------------------------------------------
 
@@ -2298,21 +2569,25 @@ create_duckdb_derived_handler(THD *thd, TABLE_LIST *derived)
   SELECT_LEX *sel= derived->derived->first_select();
   if (!sel) return nullptr;
 
-  // Only push down if every leaf table uses the DUCKDB engine
-  List_iterator<TABLE_LIST> it(sel->leaf_tables);
-  TABLE_LIST *tl;
-  while ((tl= it++))
+  // Require at least one DuckDB leaf (to identify the database and connection).
+  // All other leaves — whether CTE-backed or physical MariaDB tables — are
+  // injectable at runtime by init_scan's retry loop, so we allow them here.
+  TABLE_LIST *duckdb_leaf= nullptr;
   {
-    if (!tl->table || tl->table->file->ht != duckdb_hton)
-      return nullptr;
+    List_iterator<TABLE_LIST> it(sel->leaf_tables);
+    TABLE_LIST *tl;
+    while ((tl= it++))
+    {
+      if (!tl->table)
+        continue;  // unresolved ref — injection will handle it
+      if (tl->table->file->ht == duckdb_hton && !duckdb_leaf)
+        duckdb_leaf= tl;
+      // non-DuckDB leaves (CTE or physical) are injectable at runtime
+    }
   }
+  if (!duckdb_leaf) return nullptr;
 
-  // Get connection from first table — same pattern as create_duckdb_select_handler
-  List_iterator<TABLE_LIST> it2(sel->leaf_tables);
-  TABLE_LIST *first= it2++;
-  if (!first || !first->table) return nullptr;
-
-  ha_duckdb *h= static_cast<ha_duckdb*>(first->table->file);
+  ha_duckdb *h= static_cast<ha_duckdb*>(duckdb_leaf->table->file);
   if (h->db_file_path.empty()) return nullptr;
 
   duckdb::DuckDB *db= registry_get(h->db_file_path);
@@ -2351,27 +2626,118 @@ int ha_duckdb_derived_handler::init_scan()
     if (c == '`') c = '"';
   sql= rewrite_mariadb_sql(sql);
 
-  try
+  // Proactively inject all non-DuckDB leaf tables into DuckDB as TEMP TABLEs.
+  // This handles the common case (MariaDB CTEs or InnoDB tables inlined into
+  // the CTE body) before the first DuckDB attempt.  For each injected table we
+  // also strip its schema qualifier from the SQL so DuckDB can find the
+  // unqualified temp table.
   {
-    register_active_connection(thd, connection);
-    auto r= connection->Query(sql);
-    unregister_active_connection(thd);
-    if (r->HasError())
+    SELECT_LEX *sel= unit->first_select();
+    if (sel)
     {
-      sql_print_error("DuckDB derived pushdown failed: %s\nSQL: %s",
-                      r->GetErrorObject().Message().c_str(), sql.c_str());
+      List_iterator<TABLE_LIST> it(sel->leaf_tables);
+      TABLE_LIST *tl;
+      while ((tl= it++))
+      {
+        if (!tl->table || tl->table->file->ht == duckdb_hton)
+          continue;  // DuckDB table — no injection needed
+
+        std::string tname(tl->table->s->table_name.str);
+        bool ok= false;
+        if (tl->with)
+          ok= inject_cte_into_duckdb(connection, thd, tl->with, tname);
+        else
+          ok= inject_table_into_duckdb(connection, tl->table, tname);
+
+        if (ok)
+          strip_schema_for_table(sql, tname);
+        else
+          sql_print_warning("DuckDB derived: pre-inject '%s' failed; retry loop will handle it",
+                            tname.c_str());
+      }
+    }
+  }
+
+  // Fix bare INNER JOINs: MariaDB's printer moves ON conditions to WHERE,
+  // which DuckDB rejects.  Convert "JOIN table WHERE" to "JOIN table ON TRUE WHERE".
+  sql= fix_bare_joins(sql);
+
+  sql_print_information("DuckDB derived SQL (final): %s", sql.c_str());
+
+  // Retry loop: if DuckDB still reports a missing table (e.g. a table referenced
+  // via a subquery alias not in leaf_tables), inject it and retry.
+  for (int attempt = 0; attempt < 8; attempt++)
+  {
+    std::unique_ptr<duckdb::MaterializedQueryResult> r;
+    try
+    {
+      register_active_connection(thd, connection);
+      r= connection->Query(sql);
+      unregister_active_connection(thd);
+    }
+    catch (const std::exception &e)
+    {
+      unregister_active_connection(thd);
+      sql_print_error("DuckDB derived pushdown exception: %s", e.what());
       return 1;
     }
-    result= r.release();
-    current_row= 0;
-  }
-  catch (const std::exception &e)
-  {
-    unregister_active_connection(thd);
-    sql_print_error("DuckDB derived pushdown exception: %s", e.what());
+
+    if (!r->HasError())
+    {
+      result= r.release();
+      current_row= 0;
+      return 0;
+    }
+
+    std::string errmsg= r->GetErrorObject().Message();
+    std::string missing= extract_missing_table(errmsg);
+
+    if (missing.empty())
+    {
+      sql_print_error("DuckDB derived pushdown failed: %s\nSQL: %s",
+                      errmsg.c_str(), sql.c_str());
+      return 1;
+    }
+
+    // Resolve missing table from MariaDB — physical table first, then CTE
+    TABLE *open_tbl= find_open_table_by_name(thd, missing);
+    if (open_tbl)
+    {
+      if (!inject_table_into_duckdb(connection, open_tbl, missing))
+      {
+        sql_print_error("DuckDB derived pushdown: failed to inject table '%s'",
+                        missing.c_str());
+        return 1;
+      }
+      strip_schema_for_table(sql, missing);
+      sql= fix_bare_joins(sql);
+      continue;
+    }
+
+    With_element *cte= find_cte_by_name(thd, missing);
+    if (cte)
+    {
+      if (!inject_cte_into_duckdb(connection, thd, cte, missing))
+      {
+        sql_print_error("DuckDB derived pushdown: failed to inject CTE '%s'",
+                        missing.c_str());
+        return 1;
+      }
+      strip_schema_for_table(sql, missing);
+      sql= fix_bare_joins(sql);
+      continue;
+    }
+
+    // Cannot resolve — propagate original DuckDB error
+    sql_print_error("DuckDB derived pushdown: unresolvable table '%s'\n"
+                    "Full error: %s\nSQL: %s",
+                    missing.c_str(), errmsg.c_str(), sql.c_str());
     return 1;
   }
-  return 0;
+
+  sql_print_error("DuckDB derived pushdown: injection retry limit reached\nSQL: %s",
+                  sql.c_str());
+  return 1;
 }
 
 int ha_duckdb_derived_handler::next_row()

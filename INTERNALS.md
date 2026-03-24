@@ -28,7 +28,7 @@ HolyDuck implements three pushdown paths. EXPLAIN output tells you which fired:
 |---|---|---|
 | `PUSHED SELECT` | All tables in query are DUCKDB | Entire SELECT including GROUP BY, ORDER BY |
 | `PUSHED UNION` | All arms of UNION/INTERSECT/EXCEPT are DUCKDB | Entire set operation |
-| `PUSHED DERIVED` | CTE or subquery references only DUCKDB tables | Entire CTE/subquery |
+| `PUSHED DERIVED` | CTE or subquery has at least one DUCKDB table; non-DUCKDB leaves (CTE or physical) are injected as temp tables | Entire CTE/subquery |
 
 For mixed-engine queries where pushdown cannot fire on the full query, two optimizations still apply:
 
