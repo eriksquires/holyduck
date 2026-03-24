@@ -85,7 +85,7 @@ The two implementations differ fundamentally in how they use DuckDB.
 
 ### Mixed-Engine Query Handling
 
-This single architectural difference drives most of the feature divergence between the two projects — and is where all the interesting parts of HolyDuck are.
+The choice of whether to support mixed-engine joins drives most of the feature divergence between the two projects — and is where all the interesting parts of HolyDuck are.
 
 **HolyDuck** handles mixed DuckDB + InnoDB queries by injecting InnoDB tables into
 DuckDB as temporary tables at query time, then pushing the entire query — including
