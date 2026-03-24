@@ -1,14 +1,12 @@
-# HolyDuck — DuckDB Storage Engine for MariaDB
+# HolyDuck — DuckDB Analytics Engine for MariaDB
 
 *Bringing divine analytical powers to Maria.*
 
-**HolyDuck** (`ha_duckdb`) is a MariaDB storage engine plugin that embeds [DuckDB](https://duckdb.org/) as a first-class storage engine next to InnoDB. Create tables with `ENGINE=DUCKDB` and query them with standard SQL — DuckDB handles the heavy lifting.
+**HolyDuck** (`ha_duckdb`) is a MariaDB storage engine plugin that embeds [DuckDB](https://duckdb.org/) as a first-class DB storage engine next to InnoDB. Create tables with `ENGINE=DUCKDB` and query them with standard SQL — DuckDB handles the heavy lifting.
 
 ## Why
 
-MariaDB is beloved. DuckDB is a miracle of analytical performance. Maria deserved a blessing.
-
-HolyDuck is that blessing — it embeds DuckDB directly inside MariaDB so you can:
+MariaDB is beloved. DuckDB is a miracle of analytical performance and small teams needed a fast OLAP oriented data engine. HolyDuck is that blessing — it embeds DuckDB directly inside MariaDB so you can:
 
 - Run analytical queries (GROUP BY, aggregations, window functions) at DuckDB speed
 - Mix DuckDB and InnoDB tables in the same query — DuckDB for analytics
