@@ -21,7 +21,7 @@ That really explains everything about these two projects.  From this point on we
 
 **HolyDuck** is a MariaDB 11.8.3 storage engine plugin with a DuckDB back-end.
 
-One big obvious way to see differences is in what is in the public repo of each. As of March 24, 2026: 
+We can start comparing the two projects by looking at what is in the public repo of each. As of March 24, 2026:
 
 |                               | AliSQL            | HolyDuck                           |
 | ----------------------------- | ----------------- | ---------------------------------- |
@@ -135,24 +135,6 @@ instance and per-thread connections maintained in the MySQL `THD` context
 (`thd->get_duckdb_context()`).
 
 ---
-## Unavoidable Similarities
-
-The following similarities exist because they are mandated by the MySQL/MariaDB
-storage engine plugin API. Any two independent implementations would share them:
-
-- **File names** `ha_duckdb.h` / `ha_duckdb.cc` — the `ha_<engine>.{h,cc}` naming convention is required by MariaDB/MySQL for all storage engine handlers.  
-- **Class declaration** `class ha_duckdb : public handler` — the base class and name
-  are dictated by the plugin API.
-- **Standard handler methods** (`rnd_init`, `rnd_next`, `write_row`, `create`,
-  `external_lock`, etc.) — every storage engine must implement these interfaces.
-- **`handlerton` registration boilerplate** — plugin init/deinit, sysvar registration,
-  and engine capability declarations follow a fixed structure.
-
-These are equivalent to two people writing separate "Hello World" programs and both
-typing `int main()`. It is not copying — it is the interface.
-
----
-
 
 ## Summary Table
 
@@ -166,6 +148,24 @@ typing `int main()`. It is not copying — it is the interface.
 | SQL rewriting | Macro system + targeted rewrite pass | Explicit DDL/DML convertor classes |
 | Multiple databases | Yes — registry keyed on file path | No — single global DuckDB instance |
 | Primary use case | Analytics pushdown; mixed OLAP/OLTP queries | Full MySQL replacement with columnar storage |
+
+---
+
+## Unavoidable Similarities
+
+The following similarities exist because they are mandated by the MySQL/MariaDB
+storage engine plugin API. Any two independent implementations would share them:
+
+- **File names** `ha_duckdb.h` / `ha_duckdb.cc` — the `ha_<engine>.{h,cc}` naming convention is required by MariaDB/MySQL for all storage engine handlers.
+- **Class declaration** `class ha_duckdb : public handler` — the base class and name
+  are dictated by the plugin API.
+- **Standard handler methods** (`rnd_init`, `rnd_next`, `write_row`, `create`,
+  `external_lock`, etc.) — every storage engine must implement these interfaces.
+- **`handlerton` registration boilerplate** — plugin init/deinit, sysvar registration,
+  and engine capability declarations follow a fixed structure.
+
+These are equivalent to two people writing separate "Hello World" programs and both
+typing `int main()`. It is not copying — it is the interface.
 
 ---
 
