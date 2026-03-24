@@ -17,8 +17,6 @@ That really explains everything about these two projects.  From this point on we
 
 ## Code Base
 
-As noted above, the fundamental difference is how each project handles mixed-engine joins — and that starts with what each product actually is:
-
 **AliSQL** is a MySQL 8 fork with DuckDB inside it.
 
 **HolyDuck** is a MariaDB 11.8.3 storage engine plugin with a DuckDB back-end.
@@ -85,7 +83,7 @@ The two implementations differ fundamentally in how they use DuckDB.
 
 ### Mixed-Engine Query Handling
 
-The choice of whether to support mixed-engine joins drives most of the feature divergence between the two projects — and is where all the interesting parts of HolyDuck are.
+As we alluded to at the start, the choice of whether to support mixed-engine joins or not drives most of the feature divergence between the two projects.  How we handle these cases is where all the interesting parts of HolyDuck are.
 
 **HolyDuck** handles mixed DuckDB + InnoDB queries by injecting InnoDB tables into
 DuckDB as temporary tables at query time, then pushing the entire query — including
