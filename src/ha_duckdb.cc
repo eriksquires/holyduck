@@ -45,6 +45,27 @@ static std::map<std::string, DuckDBEntry> g_duckdb_registry;
 static mysql_mutex_t g_duckdb_mutex;
 
 // ---------------------------------------------------------------------------
+// Active query registry — maps THD* to the DuckDB connection currently
+// executing a query for that thread. Used by kill_query to interrupt it.
+// Protected by g_duckdb_mutex.
+// ---------------------------------------------------------------------------
+static std::map<THD*, duckdb::Connection*> g_active_connections;
+
+static void register_active_connection(THD *thd, duckdb::Connection *conn)
+{
+  mysql_mutex_lock(&g_duckdb_mutex);
+  g_active_connections[thd]= conn;
+  mysql_mutex_unlock(&g_duckdb_mutex);
+}
+
+static void unregister_active_connection(THD *thd)
+{
+  mysql_mutex_lock(&g_duckdb_mutex);
+  g_active_connections.erase(thd);
+  mysql_mutex_unlock(&g_duckdb_mutex);
+}
+
+// ---------------------------------------------------------------------------
 // MariaDB-compatibility SQL macros
 // Installed once per DuckDB file so that pushed-down queries using
 // MariaDB datetime/string function names work transparently in DuckDB.
@@ -259,9 +280,147 @@ static MYSQL_SYSVAR_ULONG(
   1024, /* max */
   0);
 
+static char *duckdb_last_result_var= const_cast<char*>("");
+
+static void set_last_result(const std::string &msg)
+{
+  if (duckdb_last_result_var && *duckdb_last_result_var)
+    my_free(duckdb_last_result_var);
+  duckdb_last_result_var= my_strdup(PSI_NOT_INSTRUMENTED,
+                                    msg.c_str(), MYF(MY_WME));
+}
+
+static ulong duckdb_reload_extensions_var= 0;
+
+static void duckdb_reload_extensions_update(THD *thd,
+                                            struct st_mysql_sys_var *var,
+                                            void *var_ptr, const void *save)
+{
+  std::string db_file= std::string(mysql_real_data_home) + "#duckdb/global.duckdb";
+  duckdb::DuckDB *db= registry_get(db_file);
+  if (!db)
+  {
+    sql_print_warning("DuckDB: reload_extensions — no open database to reload");
+    return;
+  }
+  install_mariadb_compat_macros(db);
+  registry_release(db_file);
+  sql_print_information("DuckDB: extensions reloaded from holyduck_duckdb_extensions.sql");
+}
+
+static MYSQL_SYSVAR_ULONG(
+  reload_extensions,
+  duckdb_reload_extensions_var,
+  PLUGIN_VAR_RQCMDARG,
+  "Set to any value to reload holyduck_duckdb_extensions.sql without restarting MariaDB",
+  NULL, duckdb_reload_extensions_update,
+  0,    /* default */
+  0,    /* min */
+  ULONG_MAX, /* max */
+  0);
+
+static char *duckdb_execute_script_var= NULL;
+
+static void duckdb_execute_script_update(THD *thd,
+                                         struct st_mysql_sys_var *var,
+                                         void *var_ptr, const void *save)
+{
+  const char *path= *(const char **)save;
+  if (!path || !*path) return;
+
+  std::ifstream f(path);
+  if (!f.good())
+  {
+    sql_print_error("DuckDB: execute_script — cannot open file: %s", path);
+    return;
+  }
+
+  std::string text((std::istreambuf_iterator<char>(f)),
+                    std::istreambuf_iterator<char>());
+  auto stmts= parse_sql_statements(text);
+
+  std::string db_file= std::string(mysql_real_data_home) + "#duckdb/global.duckdb";
+  duckdb::DuckDB *db= registry_get(db_file);
+  if (!db)
+  {
+    sql_print_error("DuckDB: execute_script — no open database");
+    return;
+  }
+
+  duckdb::Connection conn(*db);
+  run_macro_statements(conn, stmts, path);
+  registry_release(db_file);
+  std::string ok= std::string(path) + " — " + std::to_string(stmts.size()) + " statement(s)";
+  sql_print_information("DuckDB: executed script %s", ok.c_str());
+  set_last_result(ok);
+}
+
+static MYSQL_SYSVAR_STR(
+  execute_script,
+  duckdb_execute_script_var,
+  PLUGIN_VAR_RQCMDARG | PLUGIN_VAR_MEMALLOC,
+  "Path to a DuckDB SQL script to execute immediately (runs on SET, not persisted)",
+  NULL, duckdb_execute_script_update,
+  NULL);
+
+static char *duckdb_execute_sql_var= NULL;
+
+static void duckdb_execute_sql_update(THD *thd,
+                                      struct st_mysql_sys_var *var,
+                                      void *var_ptr, const void *save)
+{
+  const char *sql= *(const char **)save;
+  if (!sql || !*sql) return;
+
+  std::string db_file= std::string(mysql_real_data_home) + "#duckdb/global.duckdb";
+  duckdb::DuckDB *db= registry_get(db_file);
+  if (!db)
+  {
+    sql_print_error("DuckDB: execute_sql — no open database");
+    return;
+  }
+
+  duckdb::Connection conn(*db);
+  auto r= conn.Query(std::string(sql));
+  if (r->HasError())
+  {
+    std::string err= r->GetErrorObject().Message();
+    sql_print_error("DuckDB: execute_sql failed: %s\nSQL: %s", err.c_str(), sql);
+    set_last_result("Error: " + err);
+  }
+  else
+  {
+    std::string ok= std::to_string(r->RowCount()) + " row(s)";
+    sql_print_information("DuckDB: execute_sql succeeded (%s)", ok.c_str());
+    set_last_result(ok);
+  }
+
+  registry_release(db_file);
+}
+
+static MYSQL_SYSVAR_STR(
+  last_result,
+  duckdb_last_result_var,
+  PLUGIN_VAR_READONLY | PLUGIN_VAR_NOCMDOPT,
+  "Result of the last duckdb_execute_sql or duckdb_execute_script call",
+  NULL, NULL,
+  "");
+
+static MYSQL_SYSVAR_STR(
+  execute_sql,
+  duckdb_execute_sql_var,
+  PLUGIN_VAR_RQCMDARG | PLUGIN_VAR_MEMALLOC,
+  "Execute a DDL/DML statement directly in DuckDB. Result rows from SELECT are discarded — use for CREATE, INSERT, DROP, COPY etc. Check duckdb_last_result for outcome.",
+  NULL, duckdb_execute_sql_update,
+  NULL);
+
 static struct st_mysql_sys_var *duckdb_system_variables[]=
 {
   MYSQL_SYSVAR(max_threads),
+  MYSQL_SYSVAR(reload_extensions),
+  MYSQL_SYSVAR(execute_script),
+  MYSQL_SYSVAR(execute_sql),
+  MYSQL_SYSVAR(last_result),
   NULL
 };
 
@@ -299,6 +458,11 @@ static int duckdb_discover_table_names(handlerton *hton, const LEX_CSTRING *db,
                                        handlerton::discovered_list *result);
 static int duckdb_discover_table_existence(handlerton *hton, const char *db,
                                            const char *table_name);
+static void duckdb_kill_query(handlerton *hton, THD *thd,
+                              enum thd_kill_levels level);
+static bool duckdb_show_status(handlerton *hton, THD *thd,
+                               stat_print_fn *stat_print,
+                               enum ha_stat_type stat_type);
 
 static int duckdb_init_func(void *p)
 {
@@ -319,6 +483,8 @@ static int duckdb_init_func(void *p)
   duckdb_hton->discover_table=            duckdb_discover_table;
   duckdb_hton->discover_table_names=      duckdb_discover_table_names;
   duckdb_hton->discover_table_existence=  duckdb_discover_table_existence;
+  duckdb_hton->kill_query=                duckdb_kill_query;
+  duckdb_hton->show_status=               duckdb_show_status;
   duckdb_hton->flags=           0;
   duckdb_hton->tablefile_extensions= ha_duckdb_exts;
 
@@ -383,6 +549,49 @@ static int duckdb_discover_table_existence(handlerton *hton, const char *db,
 
   registry_release(db_file);
   return exists;
+}
+
+static void duckdb_kill_query(handlerton *hton, THD *thd,
+                              enum thd_kill_levels level)
+{
+  mysql_mutex_lock(&g_duckdb_mutex);
+  auto it= g_active_connections.find(thd);
+  if (it != g_active_connections.end())
+    it->second->Interrupt();
+  mysql_mutex_unlock(&g_duckdb_mutex);
+}
+
+static bool duckdb_show_status(handlerton *hton, THD *thd,
+                               stat_print_fn *stat_print,
+                               enum ha_stat_type stat_type)
+{
+  if (stat_type != HA_ENGINE_STATUS)
+    return false;
+
+  std::string db_file= std::string(mysql_real_data_home) + "#duckdb/global.duckdb";
+
+  // DuckDB version
+  {
+    std::string ver= duckdb::DuckDB::LibraryVersion();
+    stat_print(thd, "DuckDB", 6, "Version", 7, ver.c_str(), ver.length());
+  }
+
+  // Data file path
+  stat_print(thd, "DuckDB", 6, "Data file", 9,
+             db_file.c_str(), db_file.length());
+
+  // Open databases and active queries (under mutex)
+  mysql_mutex_lock(&g_duckdb_mutex);
+  std::string open_dbs= std::to_string(g_duckdb_registry.size());
+  std::string active_q= std::to_string(g_active_connections.size());
+  mysql_mutex_unlock(&g_duckdb_mutex);
+
+  stat_print(thd, "DuckDB", 6, "Open databases", 14,
+             open_dbs.c_str(), open_dbs.length());
+  stat_print(thd, "DuckDB", 6, "Active queries", 14,
+             active_q.c_str(), active_q.length());
+
+  return false;
 }
 
 static int duckdb_discover_table_names(handlerton *hton, const LEX_CSTRING *db,
@@ -1412,7 +1621,9 @@ int ha_duckdb::rnd_init(bool scan)
     if (!pushed_where.empty())
       sql += " WHERE " + pushed_where;
 
+    register_active_connection(ha_thd(), connection);
     auto r= connection->Query(sql);
+    unregister_active_connection(ha_thd());
     if (r->HasError())
     {
       sql_print_error("DuckDB: rnd_init failed: %s", r->GetErrorObject().Message().c_str());
@@ -1422,6 +1633,7 @@ int ha_duckdb::rnd_init(bool scan)
   }
   catch (const std::exception &e)
   {
+    unregister_active_connection(ha_thd());
     sql_print_error("DuckDB: rnd_init exception: %s", e.what());
     DBUG_RETURN(HA_ERR_INTERNAL_ERROR);
   }
@@ -1983,7 +2195,9 @@ int ha_duckdb_select_handler::init_scan()
 
   try
   {
+    register_active_connection(thd, connection);
     auto r= connection->Query(sql);
+    unregister_active_connection(thd);
     if (r->HasError())
     {
       sql_print_error("DuckDB pushdown: query failed: %s\nSQL: %s",
@@ -1995,6 +2209,7 @@ int ha_duckdb_select_handler::init_scan()
   }
   catch (const std::exception &e)
   {
+    unregister_active_connection(thd);
     sql_print_error("DuckDB pushdown: exception: %s", e.what());
     return 1;
   }
@@ -2138,7 +2353,9 @@ int ha_duckdb_derived_handler::init_scan()
 
   try
   {
+    register_active_connection(thd, connection);
     auto r= connection->Query(sql);
+    unregister_active_connection(thd);
     if (r->HasError())
     {
       sql_print_error("DuckDB derived pushdown failed: %s\nSQL: %s",
@@ -2150,6 +2367,7 @@ int ha_duckdb_derived_handler::init_scan()
   }
   catch (const std::exception &e)
   {
+    unregister_active_connection(thd);
     sql_print_error("DuckDB derived pushdown exception: %s", e.what());
     return 1;
   }

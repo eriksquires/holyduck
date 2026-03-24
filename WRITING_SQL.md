@@ -213,8 +213,8 @@ HolyDuck has a sample SQL file with supported MariaDB stored functions: holyduck
 which includes RoundDateTime()
 
 We should point out that dual entries are only needed for NEW functions or features not in MariaDB.  In cases
-when the issue is DuckDB lacks a function which exists in MariaDB you only need to create a new macro and restart
-MariaDB.
+when the issue is DuckDB lacks a function which exists in MariaDB you only need to create a new macro and reload
+the extensions file.
 
 ## Views
 
@@ -234,13 +234,20 @@ CREATE OR REPLACE VIEW mydb.v_my_view AS
     SELECT id, val * 2 AS double_val FROM mydb.my_table;
 ```
 
-**Step 2** — restart MariaDB. That's it, `v_my_view` is now usable from MariaDB. HolyDuck discovers the view automatically the first time it's queried.
+**Step 2** — reload the extensions file:
+```sql
+SET GLOBAL duckdb_reload_extensions = 1;
+```
+That's it — `v_my_view` is now usable from MariaDB. HolyDuck discovers the view automatically the first time it's queried.
 
-To remove a view, delete it from `holyduck_duckdb_extensions.sql` and add a `DROP VIEW IF EXISTS` so it's removed from DuckDB on the next restart:
+To remove a view, delete it from `holyduck_duckdb_extensions.sql`, add a `DROP VIEW IF EXISTS` line, then reload:
 ```sql
 DROP VIEW IF EXISTS mydb.v_my_view;
 ```
-Once you've restarted and confirmed it's gone, remove the DROP line too.
+```sql
+SET GLOBAL duckdb_reload_extensions = 1;
+```
+Once confirmed gone, remove the DROP line and reload once more.
 
 ### Views for BI Tools
 

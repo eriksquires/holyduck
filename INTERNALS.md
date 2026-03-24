@@ -146,6 +146,36 @@ databases — stop MariaDB first, do the work with any DuckDB client, then bring
 
 ---
 
+## System Variables
+
+| Variable | Type | Description |
+|---|---|---|
+| `duckdb_max_threads` | ULONG | Max CPU threads DuckDB may use (0 = all cores) |
+| `duckdb_reload_extensions` | ULONG | Set to any value to reload `holyduck_duckdb_extensions.sql` without restarting MariaDB |
+| `duckdb_execute_script` | STRING | Path to a DuckDB SQL script to execute immediately |
+| `duckdb_execute_sql` | STRING | Execute a single DDL/DML statement directly in DuckDB. **SELECT results are discarded** — use for CREATE, INSERT, DROP, COPY, etc. |
+| `duckdb_last_result` | STRING (read-only) | Outcome of the last `execute_sql` or `execute_script` call — row count or error message |
+
+### Examples
+
+```sql
+-- Reload extensions after editing holyduck_duckdb_extensions.sql
+SET GLOBAL duckdb_reload_extensions = 1;
+
+-- Run a DuckDB SQL script
+SET GLOBAL duckdb_execute_script = '/data/load_parquet.sql';
+SELECT @@GLOBAL.duckdb_last_result;
+
+-- Execute a single statement directly in DuckDB
+SET GLOBAL duckdb_execute_sql = 'COPY my_table FROM ''/data/file.parquet''';
+SELECT @@GLOBAL.duckdb_last_result;
+
+-- Check engine status
+SHOW ENGINE DUCKDB STATUS;
+```
+
+---
+
 ## Known Limitations
 
 | Area | Status |
