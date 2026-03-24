@@ -39,8 +39,6 @@ One big obvious way to see differences is in what is in the public repo of each.
 
 ## Fundamentally Different Operation and Goals
 
-Once you understand the difference in architecture and how we each answer questions about table joins it becomes crystal clear that there's no room for overlap.
-
 **AliSQL's DuckDB integration is HTAP** — Hybrid Transactional/Analytical Processing.
 The design goal is to give you real-time analytical reads on your *existing* InnoDB data
 without changing your schema. InnoDB remains the source of truth; DuckDB receives a
