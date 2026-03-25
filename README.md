@@ -29,8 +29,8 @@ Another important limitation is that MariaDB enforces it's SQL language idioms. 
 - [INSTALLATION.md](INSTALLATION.md)
 - [BUILDING.md](BUILDING.md)
 - Comparison Guides:
-- [ColumnStore](HOLYDUCK_VS_CS.md)
-- [AliSQL](HOLYDUCK_VS_ALISQL.md) 
+  - [ColumnStore](HOLYDUCK_VS_CS.md)
+  - [AliSQL](HOLYDUCK_VS_ALISQL.md) 
 
 
 ## License
