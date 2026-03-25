@@ -2265,6 +2265,52 @@ static std::string rewrite_mariadb_sql(const std::string &sql)
 
   s= strip_db_qualifier(s);
 
+  // Strip MariaDB's <expr_cache><key>(expr) wrapper.
+  // MariaDB's optimizer emits <expr_cache><col_ref>(expr) for cached subquery
+  // lookups (e.g. NOT IN rewritten via materialisation).  DuckDB rejects the
+  // <...> syntax entirely.  Strip the wrapper and emit just the inner expr.
+  {
+    std::string out;
+    out.reserve(s.size());
+    size_t i= 0, n= s.size();
+    const std::string tag= "<expr_cache>";
+    while (i < n)
+    {
+      if (s.compare(i, tag.size(), tag) == 0)
+      {
+        i += tag.size();
+        // Skip the <key> part: scan until matching '>'
+        if (i < n && s[i] == '<')
+        {
+          int depth= 1;
+          i++;
+          while (i < n && depth > 0)
+          {
+            if      (s[i] == '<') depth++;
+            else if (s[i] == '>') depth--;
+            i++;
+          }
+        }
+        // Now strip the outer '(' and emit inner expr up to matching ')'
+        if (i < n && s[i] == '(')
+        {
+          i++;  // skip '('
+          int depth= 1;
+          while (i < n && depth > 0)
+          {
+            if      (s[i] == '(') { depth++; out += s[i]; }
+            else if (s[i] == ')') { depth--; if (depth > 0) out += s[i]; }
+            else                    out += s[i];
+            i++;
+          }
+        }
+      }
+      else
+        out += s[i++];
+    }
+    s= out;
+  }
+
   // Strip MariaDB's <cache>(...) wrapper around constant expressions.
   // MariaDB's AST printer emits e.g. <cache>('2022-01-01') for literals
   // that have been evaluated and cached.  DuckDB's parser rejects this
@@ -2326,6 +2372,68 @@ static std::string rewrite_mariadb_sql(const std::string &sql)
           else                    out += s[i];
           i++;
         }
+      }
+      else
+        out += s[i++];
+    }
+    s= out;
+  }
+
+  // !(<exists>(expr)) → NOT EXISTS (expr)
+  // <exists>(expr)   → EXISTS (expr)
+  // MariaDB's printer emits NOT IN / EXISTS subqueries using internal tags:
+  //   NOT IN  → !(<exists>(select ...))
+  //   EXISTS  → <in_optimizer>(1, exists(select ...))   [handled above]
+  // DuckDB rejects both the ! prefix and the <exists> tag.  We rewrite:
+  //   !(<exists>(expr)) → NOT EXISTS (expr)
+  //   <exists>(expr)    → EXISTS (expr)       [bare <exists> after above pass]
+  {
+    // Helper: extract parenthesised content starting at s[i] (i points just
+    // past the opening '('), emitting it verbatim, return pos after closing ')'.
+    auto extract_parens = [&](std::string &out, size_t i, size_t n,
+                               const std::string &sql) -> size_t {
+      int depth= 1;
+      while (i < n && depth > 0)
+      {
+        if      (sql[i] == '(') { depth++; out += sql[i]; }
+        else if (sql[i] == ')') { depth--; if (depth > 0) out += sql[i]; }
+        else                      out += sql[i];
+        i++;
+      }
+      return i;
+    };
+
+    std::string out;
+    out.reserve(s.size());
+    size_t i= 0, n= s.size();
+    const std::string not_exists_tag= "!(<exists>(";
+    const std::string exists_tag    = "<exists>(";
+    while (i < n)
+    {
+      if (s.compare(i, not_exists_tag.size(), not_exists_tag) == 0)
+      {
+        out += "NOT EXISTS (";
+        i += not_exists_tag.size();
+        i = extract_parens(out, i, n, s);  // inner expr (no outer paren yet)
+        out += ')';
+        i++;                               // skip final ')' of !(<exists>(...))
+      }
+      else if (s.compare(i, exists_tag.size(), exists_tag) == 0)
+      {
+        out += "EXISTS (";
+        i += exists_tag.size();
+        i = extract_parens(out, i, n, s);
+        out += ')';
+      }
+      // !exists(expr) → NOT EXISTS (expr)
+      // NOT EXISTS emitted without the <exists> wrapper (bare exists function).
+      else if (i + 7 < n && s[i] == '!' &&
+               s.compare(i+1, 7, "exists(") == 0)
+      {
+        out += "NOT EXISTS (";
+        i += 8;  // skip '!' + 'exists('
+        i = extract_parens(out, i, n, s);
+        out += ')';
       }
       else
         out += s[i++];
