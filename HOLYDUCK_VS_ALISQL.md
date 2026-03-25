@@ -86,8 +86,7 @@ executes it and returns a result set. MariaDB's row-by-row execution engine is
 bypassed entirely for pushed queries. These APIs are MariaDB-specific and have no
 equivalent in MySQL 8 — AliSQL could not implement this architecture even if it wanted to.
 
-**AliSQL** does not use `select_handler` or `derived_handler` at all — these APIs do
-not exist in MySQL 8. Instead it uses a full SQL string pass-through: MySQL parses
+**AliSQL** uses a full SQL string pass-through: MySQL parses
 and validates the query, then hands the entire SQL string directly to DuckDB's native
 engine via `duckdb_query_and_send()`. DuckDB does all the execution. This works
 because on an AliSQL analytical replica, all user data tables have been converted to
