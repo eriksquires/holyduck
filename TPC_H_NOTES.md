@@ -83,25 +83,23 @@ which handles it natively.  No rewrite or workaround needed.
 
 ---
 
-### Derived table in FROM — OPEN BUG
+### Derived table in FROM with `NOT EXISTS` — FIXED
 
-**Affected queries:** Q22 (original form)
+**Affected queries:** Q22
 
-`SELECT ... FROM (SELECT ... FROM <duckdb_table> ...) AS alias` fails when the
-derived table contains `NOT EXISTS` or correlated subqueries.  The `derived_handler`
-still uses MariaDB's AST printer, which emits `<materialize>` and `!(...  in  ...)`
-artifacts for these patterns.  DuckDB rejects both.
+`NOT EXISTS` inside a derived table caused the derived_handler's AST printer to
+emit three chained artifacts that DuckDB rejects:
 
-The `select_handler` original-SQL path does not help here: for a derived table,
-`thd->query()` is the full outer query, not the subquery — we can't push just the
-derived table body from the original SQL string.
+1. `<materialize>(SELECT ...)` — materialized subquery wrapper
+2. `, <primary_index_lookup>(col IN <temporary table>)` — key-lookup shortcut
+   appended to the IN list (MariaDB sees the DuckDB table's primary key and
+   plans an index lookup)
+3. `!(expr)` — C-style logical NOT instead of SQL `NOT`
 
-**Workaround for Q22:** Rewrite to eliminate the outer derived table — push the
-aggregation directly into the outer SELECT.
-
-**Status:** Root cause under investigation.  Fix requires either teaching the
-derived_handler to detect pure-DuckDB subqueries and skip materialization, or
-stripping `<materialize>` artifacts in `rewrite_mariadb_sql`.
+**Fix:** Added three strippers to `rewrite_mariadb_sql()`:
+- Strip `<materialize>` prefix (keeping the parenthesised subquery)
+- Strip `, <primary_index_lookup>(...)` list element (keeping the real subquery)
+- Rewrite `!(` → `NOT (` (avoiding `!=`)
 
 ---
 
@@ -147,11 +145,11 @@ original-SQL path passes the full `WITH ... SELECT` to DuckDB unchanged.
 
 ---
 
-### Q22 — outer derived table rewritten
+### Q22 — original form now works
 
-The standard Q22 wraps its filter logic in a derived table `custsale` and aggregates
-the outer result.  This triggers the derived-table crash bug.  The query is rewritten
-to inline the aggregation directly, eliminating the outer derived table.
+The standard Q22 wraps its filter logic in a derived table `custsale`.  Three
+chained MariaDB AST artifacts (`<materialize>`, `<primary_index_lookup>`, `!(`)
+are now stripped in `rewrite_mariadb_sql()`.  The verbatim TPC-H SQL runs correctly.
 
 ---
 
@@ -172,7 +170,7 @@ The canonical Q8 parameters (BRAZIL, AMERICA, ECONOMY ANODIZED STEEL) return
 | `!(<exists>)` / `!exists()` wrappers | MariaDB optimizer | Fixed |
 | `<expr_cache><key>()` wrapper | MariaDB optimizer | Fixed |
 | `EXISTS (SELECT *)` crash | HolyDuck bug | Fixed |
-| Derived table in FROM (derived_handler) | HolyDuck bug | Open — Q22 rewritten |
+| Derived table in FROM (derived_handler) | HolyDuck bug | Fixed |
 | CTE references stripped | HolyDuck bug | Fixed |
 | Q15 `CREATE VIEW` form | TPC-H template | Use CTE form (now works) |
 | Q22 outer derived table | TPC-H structure | Rewritten to avoid |
@@ -203,4 +201,4 @@ The canonical Q8 parameters (BRAZIL, AMERICA, ECONOMY ANODIZED STEEL) return
 | Q19 | Pass | |
 | Q20 | Pass | |
 | Q21 | Pass | `SELECT 1` in EXISTS |
-| Q22 | Pass | Outer derived table rewritten |
+| Q22 | Pass | Original SQL; derived_handler artifacts stripped |

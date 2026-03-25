@@ -2340,6 +2340,58 @@ static std::string rewrite_mariadb_sql(const std::string &sql)
     s= out;
   }
 
+  // Strip MariaDB's <materialize> prefix from subquery wrappers.
+  // MariaDB's optimizer emits col IN (<materialize>(SELECT ...)) when it
+  // decides to materialise a subquery.  DuckDB rejects the <...> tag; strip
+  // it, leaving col IN ((SELECT ...)) which DuckDB handles correctly.
+  {
+    static const std::regex materialize_re("<materialize>\\s*",
+                                           std::regex::icase);
+    s= std::regex_replace(s, materialize_re, "");
+  }
+
+  // Strip , <primary_index_lookup>(...) from IN lists.
+  // When MariaDB sees a primary key on a DuckDB table it may plan a NOT EXISTS
+  // as: col IN ((real_subquery), <primary_index_lookup>(col IN <temporary table>))
+  // The <primary_index_lookup> element is a redundant execution-path artifact
+  // for the same subquery.  Drop the comma + node; the real subquery remains.
+  {
+    std::string out;
+    out.reserve(s.size());
+    size_t i= 0, n= s.size();
+    const std::string tag= "<primary_index_lookup>";
+    while (i < n)
+    {
+      // Match optional preceding comma+whitespace then the tag
+      if (s[i] == ',')
+      {
+        size_t j= i + 1;
+        while (j < n && s[j] == ' ') j++;
+        if (s.compare(j, tag.size(), tag) == 0)
+        {
+          // Skip tag
+          j += tag.size();
+          // Skip parenthesised content
+          if (j < n && s[j] == '(')
+          {
+            j++;
+            int depth= 1;
+            while (j < n && depth > 0)
+            {
+              if      (s[j] == '(') depth++;
+              else if (s[j] == ')') depth--;
+              j++;
+            }
+          }
+          i= j;
+          continue;
+        }
+      }
+      out += s[i++];
+    }
+    s= out;
+  }
+
   // Strip MariaDB's <in_optimizer>(val, expr) wrapper.
   // MariaDB's optimizer wraps IN/EXISTS subqueries in an internal Item_in_optimizer
   // node whose printed form is <in_optimizer>(val, expr).  DuckDB does not
@@ -2434,6 +2486,14 @@ static std::string rewrite_mariadb_sql(const std::string &sql)
         i += 8;  // skip '!' + 'exists('
         i = extract_parens(out, i, n, s);
         out += ')';
+      }
+      // !(expr) → NOT (expr)
+      // MariaDB uses C-style ! for logical NOT; DuckDB requires NOT.
+      // Only rewrite !( — leave != alone.
+      else if (s[i] == '!' && i + 1 < n && s[i+1] == '(')
+      {
+        out += "NOT ";
+        i++;  // skip '!', keep '('
       }
       else
         out += s[i++];
