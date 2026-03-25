@@ -17,13 +17,6 @@ We are particularly proud of the performance of mixed-engine joins.  The pain po
 
 The ideal user of HolyDuck is a small team with a handful of very large tables that get a lot of reads during the day and are updated nightly.  
 
-## Comparisons
-
-We've written comparisons to:
-
-- [ColumnStore](HOLYDUCK_VS_CS.md)
-- [AliSQL](HOLYDUCK_VS_ALISQL.md) 
-
 ## DuckDB Limitations
 
 HoldyDuck is much more team friendly in a sense than DuckDB alone but it's a gift, not magic. 
@@ -32,13 +25,13 @@ Alone DuckDB does not handle more than one write connection at a time.  HolyDuck
 
 Another important limitation is that MariaDB enforces it's SQL language idioms.  You can't run anything against DuckDB that MariaDB won't allow. Put on your pirate boots though, we have ways around that.  
 
-## Installation
+## Additional resources
+- [INSTALLATION.md](INSTALLATION.md)
+- [BUILDING.md](BUILDING.md)
+- Comparison Guides:
+- [ColumnStore](HOLYDUCK_VS_CS.md)
+- [AliSQL](HOLYDUCK_VS_ALISQL.md) 
 
-See [INSTALLATION.md](INSTALLATION.md) for a quick guide.
-
-## Building from Source
-
-See [BUILDING.md](BUILDING.md) for the full build workflow — Docker base images, MariaDB source setup, cmake configuration, and iterative development cycle.
 
 ## License
 
