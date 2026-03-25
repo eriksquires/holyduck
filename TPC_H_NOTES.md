@@ -107,16 +107,18 @@ aggregation directly into the outer SELECT.
 
 ---
 
-### CTE references stripped from pushed queries — OPEN BUG
+### CTE references stripped from pushed queries — FIXED
 
 **Affected queries:** Q15
 
 When a CTE is defined at the top level and referenced in a join, MariaDB's
-`select_handler` receives the outer query with the CTE reference as a plain table
-name — the `WITH` clause is not passed through.  DuckDB reports
-"Table with name revenue does not exist".
+`select_handler` previously received only the outer query — the `WITH` clause
+was not passed through via the AST printer.
 
-**Status:** Q15 is currently blocked by this bug.
+**Fix:** The original-SQL path (`thd->query()`) includes the full `WITH ... SELECT`
+as submitted by the client.  CTE-backed leaves in `leaf_tables` are treated as
+DuckDB-compatible (they don't set `all_duckdb=false`), so the query routes to the
+original-SQL path and DuckDB receives the complete CTE definition.
 
 ---
 
@@ -141,9 +143,9 @@ values substituted in per the TPC-H specification.
 ### Q15 — uses `CREATE VIEW` / `DROP VIEW`
 
 The standard Q15 template creates a view `revenue`, queries it, then drops it.
-HolyDuck does not support DDL in the middle of a query sequence through the rewrite
-layer.  A CTE rewrite is the natural replacement, but is blocked by the CTE
-reference bug above.  Q15 is currently skipped.
+HolyDuck does not support DDL in the middle of a query sequence.  The CTE rewrite
+(`WITH revenue AS (...)`) is the natural replacement and now works correctly: the
+original-SQL path passes the full `WITH ... SELECT` to DuckDB unchanged.
 
 ---
 
@@ -173,8 +175,8 @@ The canonical Q8 parameters (BRAZIL, AMERICA, ECONOMY ANODIZED STEEL) return
 | `<expr_cache><key>()` wrapper | MariaDB optimizer | Fixed |
 | `EXISTS (SELECT *)` crash | HolyDuck bug | Open — use `SELECT 1` |
 | Derived table in FROM crash | HolyDuck bug | Open — Q15 blocked, Q22 rewritten |
-| CTE references stripped | HolyDuck bug | Open — Q15 blocked |
-| Q15 `CREATE VIEW` form | TPC-H template | Blocked (see above) |
+| CTE references stripped | HolyDuck bug | Fixed |
+| Q15 `CREATE VIEW` form | TPC-H template | Use CTE form (now works) |
 | Q22 outer derived table | TPC-H structure | Rewritten to avoid |
 | Q8 zero results at sf=0.01 | Data sparsity | Expected |
 
@@ -196,7 +198,7 @@ The canonical Q8 parameters (BRAZIL, AMERICA, ECONOMY ANODIZED STEEL) return
 | Q12 | Pass | |
 | Q13 | Pass | |
 | Q14 | Pass | |
-| Q15 | Blocked | CTE ref stripped + derived table crash |
+| Q15 | Pass | CTE form; original-SQL path includes WITH clause |
 | Q16 | Pass | |
 | Q17 | Pass | NULL result at sf=0.01 (correct) |
 | Q18 | Pass | |

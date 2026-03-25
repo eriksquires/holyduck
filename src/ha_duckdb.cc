@@ -2535,8 +2535,14 @@ static select_handler *create_duckdb_select_handler(THD *thd, SELECT_LEX *sel,
       {
         if (!duckdb_leaf) duckdb_leaf= tl;
       }
-      else
+      else if (!tl->with)
+      {
+        // CTE-backed leaves (tl->with != nullptr) don't count against
+        // all_duckdb: thd->query() includes the full WITH clause so DuckDB
+        // can resolve the CTE itself.  Only real non-DuckDB storage (InnoDB
+        // etc.) requires the injection / AST-printer path.
         all_duckdb= false;
+      }
     }
   }
   if (!duckdb_leaf) return nullptr;
