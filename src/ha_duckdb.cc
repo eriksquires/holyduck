@@ -2523,6 +2523,7 @@ static select_handler *create_duckdb_select_handler(THD *thd, SELECT_LEX *sel,
   // Non-DuckDB leaves (InnoDB or CTE-backed) are injectable at runtime by
   // init_scan, matching the same policy as create_duckdb_derived_handler.
   TABLE_LIST *duckdb_leaf= nullptr;
+  bool all_duckdb= true;
   {
     List_iterator<TABLE_LIST> it(sel->leaf_tables);
     TABLE_LIST *tl;
@@ -2530,8 +2531,12 @@ static select_handler *create_duckdb_select_handler(THD *thd, SELECT_LEX *sel,
     {
       if (!tl->table)
         continue;
-      if (tl->table->file->ht == duckdb_hton && !duckdb_leaf)
-        duckdb_leaf= tl;
+      if (tl->table->file->ht == duckdb_hton)
+      {
+        if (!duckdb_leaf) duckdb_leaf= tl;
+      }
+      else
+        all_duckdb= false;
     }
   }
   if (!duckdb_leaf) return nullptr;
@@ -2548,20 +2553,24 @@ static select_handler *create_duckdb_select_handler(THD *thd, SELECT_LEX *sel,
   catch (...) { registry_release(h->db_file_path); return nullptr; }
 
   // registry_release will be called in the handler destructor
-  return new ha_duckdb_select_handler(thd, sel, conn);
+  return new ha_duckdb_select_handler(thd, sel, conn, all_duckdb);
 }
 
 ha_duckdb_select_handler::ha_duckdb_select_handler(THD *thd, SELECT_LEX *sel,
-                                                   duckdb::Connection *conn)
+                                                   duckdb::Connection *conn,
+                                                   bool use_orig)
   : select_handler(thd, duckdb_hton, sel),
-    connection(conn), result(nullptr), current_row(0)
+    connection(conn), result(nullptr), current_row(0),
+    use_original_sql(use_orig)
 {}
 
 ha_duckdb_select_handler::ha_duckdb_select_handler(THD *thd,
                                                    SELECT_LEX_UNIT *unit,
-                                                   duckdb::Connection *conn)
+                                                   duckdb::Connection *conn,
+                                                   bool use_orig)
   : select_handler(thd, duckdb_hton, unit),
-    connection(conn), result(nullptr), current_row(0)
+    connection(conn), result(nullptr), current_row(0),
+    use_original_sql(use_orig)
 {}
 
 ha_duckdb_select_handler::~ha_duckdb_select_handler()
@@ -2570,60 +2579,138 @@ ha_duckdb_select_handler::~ha_duckdb_select_handler()
   delete connection;
 }
 
-int ha_duckdb_select_handler::init_scan()
+// ---------------------------------------------------------------------------
+// Minimal rewrite pass for original (pre-optimizer) SQL.
+// Applies only the genuine semantic transforms needed for DuckDB compatibility:
+// INTERVAL syntax, DATE literal spacing, str_to_date→strptime, char→chr.
+// Does NOT apply MariaDB AST artifact rewrites — those never appear in
+// user-submitted SQL and are only emitted by MariaDB's internal query printer.
+// ---------------------------------------------------------------------------
+static std::string rewrite_original_sql(const std::string &sql)
 {
-  // Reconstruct the SQL from the parse tree — table names are schema-qualified
-  // (e.g. test.sales) which matches our DuckDB schema layout exactly.
-  // lex_unit is set for UNION/INTERSECT/EXCEPT (create_unit path);
-  // select_lex is set for plain SELECT (create_select path).
-  String query_str;
-  if (lex_unit)
-    lex_unit->print(&query_str, QT_ORDINARY);
-  else
-    select_lex->print(thd, &query_str, QT_ORDINARY);
-  std::string sql(query_str.ptr(), query_str.length());
+  std::string s= sql;
 
-  // MariaDB print() uses backtick quoting; DuckDB expects double quotes.
-  for (char &c : sql)
-    if (c == '`') c = '"';
+  // str_to_date(str, fmt) → strptime(str, fmt)
+  s= rewrite_func_name(s, "str_to_date", "strptime");
 
-  // Rewrite MariaDB function names that can't be handled by macros.
-  sql= rewrite_mariadb_sql(sql);
+  // char(n) → chr(n)
+  s= rewrite_func_name(s, "char", "chr");
 
-  // Inject all non-DuckDB leaf tables (InnoDB, CTE-backed) into DuckDB as
-  // TEMP TABLEs so the full query — including ORDER BY, GROUP BY, HAVING —
-  // executes entirely inside DuckDB without any MariaDB-side row operations.
+  // INTERVAL 'N' unit → INTERVAL 'N units'
   {
-    SELECT_LEX *sel= select_lex;
-    if (sel)
+    static const std::regex interval_quoted_re(
+      "\\binterval\\s+'(\\d+)'\\s+(year|month|week|day|hour|minute|second)s?\\b",
+      std::regex::icase);
+    std::string result;
+    result.reserve(s.size());
+    auto it  = std::sregex_iterator(s.begin(), s.end(), interval_quoted_re);
+    auto end = std::sregex_iterator();
+    size_t last= 0;
+    for (; it != end; ++it)
     {
-      List_iterator<TABLE_LIST> it(sel->leaf_tables);
-      TABLE_LIST *tl;
-      while ((tl= it++))
-      {
-        if (!tl->table || tl->table->file->ht == duckdb_hton)
-          continue;
-
-        std::string tname(tl->table->s->table_name.str);
-        bool ok= false;
-        if (tl->with)
-          ok= inject_cte_into_duckdb(connection, thd, tl->with, tname);
-        else
-          ok= inject_table_into_duckdb(connection, tl->table, tname);
-
-        if (ok)
-          strip_schema_for_table(sql, tname);
-        else
-          sql_print_warning("DuckDB select: pre-inject '%s' failed; retry loop will handle it",
-                            tname.c_str());
-      }
+      const std::smatch &m= *it;
+      result.append(s, last, m.position() - last);
+      result += "interval '";
+      result += m[1].str();
+      result += ' ';
+      std::string unit= m[2].str();
+      for (char &c : unit) c= tolower((unsigned char)c);
+      result += unit;
+      if (unit.back() != 's') result += 's';
+      result += '\'';
+      last= m.position() + m.length();
     }
+    result.append(s, last, s.size() - last);
+    s= std::move(result);
   }
 
-  // Fix bare JOINs: MariaDB's printer emits CROSS JOIN and bare INNER JOINs
-  // without ON clauses in both the derived and select paths.  The new parser-
-  // based fix_bare_joins handles aliases correctly and is safe to apply here.
-  sql= fix_bare_joins(sql);
+  // DATE'YYYY-MM-DD' → DATE 'YYYY-MM-DD'
+  {
+    static const std::regex date_nospace_re(
+      "\\bDATE'(\\d{4}-\\d{2}-\\d{2})'",
+      std::regex::icase);
+    s= std::regex_replace(s, date_nospace_re, "DATE '$1'");
+  }
+
+  return s;
+}
+
+int ha_duckdb_select_handler::init_scan()
+{
+  std::string sql;
+
+  if (use_original_sql)
+  {
+    // All tables are DuckDB — use the original unoptimized SQL string from the
+    // client.  This bypasses MariaDB's AST printer and all its optimizer
+    // artifacts (<in_optimizer>, <expr_cache>, <exists>, etc.).
+    const char *qstr= thd->query();
+    size_t qlen= thd->query_length();
+    sql.assign(qstr ? qstr : "", qlen);
+    sql= rewrite_original_sql(sql);
+
+    // Point DuckDB at the correct schema for unqualified table names.
+    if (thd->db.str && thd->db.length)
+    {
+      std::string use_stmt= "SET search_path = '";
+      use_stmt += std::string(thd->db.str, thd->db.length);
+      use_stmt += "'";
+      connection->Query(use_stmt);
+    }
+  }
+  else
+  {
+    // Mixed-engine or complex path: reconstruct SQL from MariaDB's parse tree.
+    // lex_unit is set for UNION/INTERSECT/EXCEPT (create_unit path);
+    // select_lex is set for plain SELECT (create_select path).
+    String query_str;
+    if (lex_unit)
+      lex_unit->print(&query_str, QT_ORDINARY);
+    else
+      select_lex->print(thd, &query_str, QT_ORDINARY);
+    sql.assign(query_str.ptr(), query_str.length());
+
+    // MariaDB print() uses backtick quoting; DuckDB expects double quotes.
+    for (char &c : sql)
+      if (c == '`') c = '"';
+
+    // Rewrite MariaDB AST artifacts and function name differences.
+    sql= rewrite_mariadb_sql(sql);
+
+    // Inject all non-DuckDB leaf tables (InnoDB, CTE-backed) into DuckDB as
+    // TEMP TABLEs so the full query — including ORDER BY, GROUP BY, HAVING —
+    // executes entirely inside DuckDB without any MariaDB-side row operations.
+    {
+      SELECT_LEX *sel= select_lex;
+      if (sel)
+      {
+        List_iterator<TABLE_LIST> it(sel->leaf_tables);
+        TABLE_LIST *tl;
+        while ((tl= it++))
+        {
+          if (!tl->table || tl->table->file->ht == duckdb_hton)
+            continue;
+
+          std::string tname(tl->table->s->table_name.str);
+          bool ok= false;
+          if (tl->with)
+            ok= inject_cte_into_duckdb(connection, thd, tl->with, tname);
+          else
+            ok= inject_table_into_duckdb(connection, tl->table, tname);
+
+          if (ok)
+            strip_schema_for_table(sql, tname);
+          else
+            sql_print_warning("DuckDB select: pre-inject '%s' failed; retry loop will handle it",
+                              tname.c_str());
+        }
+      }
+    }
+
+    // Fix bare JOINs: MariaDB's printer emits CROSS JOIN and bare INNER JOINs
+    // without ON clauses in both the derived and select paths.
+    sql= fix_bare_joins(sql);
+  }
 
   // Retry loop: handles tables not visible in leaf_tables (e.g. subquery aliases).
   for (int attempt= 0; attempt < 8; attempt++)
@@ -2759,7 +2846,7 @@ create_duckdb_unit_handler(THD *thd, SELECT_LEX_UNIT *unit)
   try { conn= new duckdb::Connection(*db); }
   catch (...) { registry_release(h->db_file_path); return nullptr; }
 
-  return new ha_duckdb_select_handler(thd, unit, conn);
+  return new ha_duckdb_select_handler(thd, unit, conn, /*all_duckdb=*/true);
 }
 
 // ---------------------------------------------------------------------------

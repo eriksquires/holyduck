@@ -209,12 +209,15 @@ class ha_duckdb_select_handler : public select_handler
   duckdb::Connection *connection;
   duckdb::MaterializedQueryResult *result;
   size_t current_row;
+  bool use_original_sql;   // true when all leaf tables are DUCKDB engine
 
 public:
   ha_duckdb_select_handler(THD *thd, SELECT_LEX *sel,
-                           duckdb::Connection *conn);
+                           duckdb::Connection *conn,
+                           bool use_original_sql);
   ha_duckdb_select_handler(THD *thd, SELECT_LEX_UNIT *unit,
-                           duckdb::Connection *conn);
+                           duckdb::Connection *conn,
+                           bool use_original_sql);
   ~ha_duckdb_select_handler();
 
   int init_scan()  override;
