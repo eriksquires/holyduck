@@ -38,9 +38,16 @@ echo
 # ── Run tests ────────────────────────────────────────────────────────────────
 PASS=0; FAIL=0; NEW=0
 
-for sql_file in $(ls "${SCRIPT_DIR}"/*.sql | grep -v 'setup.sql\|teardown.sql' | sort); do
+# Collect all test SQL files: main directory first, then tpch/ subdirectory.
+ALL_SQL=$(
+  ls "${SCRIPT_DIR}"/*.sql 2>/dev/null | grep -v 'setup.sql\|teardown.sql' | sort
+  ls "${SCRIPT_DIR}"/tpch/*.sql 2>/dev/null | grep -v 'setup.sql' | sort
+)
+
+for sql_file in ${ALL_SQL}; do
   name="$(basename "${sql_file}" .sql)"
-  expected_file="${SCRIPT_DIR}/${name}.expected"
+  dir="$(dirname "${sql_file}")"
+  expected_file="${dir}/${name}.expected"
 
   actual=$(${MARIADB} < "${sql_file}" 2>&1)
 
