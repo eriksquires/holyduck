@@ -174,7 +174,9 @@ typing `int main()`. It is not copying — it is the interface.
 
 ## Maintainability
 
-Ultimately, HolyDuck has a small code base and relies completely on published APIs. When changes occur to either MariaDB or DuckDB, updates should be easy. AliSQL, having embedded both MySQL 8 and a custom DuckDB code base, can't easily upgrade either.
+Compared to AliSQL, HolyDuck has a small code base and relies completely on published APIs. When changes occur to either MariaDB or DuckDB, updates should be easy. 
+
+AliSQL, having chosen to embed both MySQL 8 and a custom DuckDB code base, can't easily upgrade either.  
 
 ---
 
