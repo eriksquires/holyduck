@@ -2294,6 +2294,45 @@ static std::string rewrite_mariadb_sql(const std::string &sql)
     s= out;
   }
 
+  // Strip MariaDB's <in_optimizer>(val, expr) wrapper.
+  // MariaDB's optimizer wraps IN/EXISTS subqueries in an internal Item_in_optimizer
+  // node whose printed form is <in_optimizer>(val, expr).  DuckDB does not
+  // recognise this syntax.  We strip the wrapper and emit just the inner expr.
+  {
+    std::string out;
+    out.reserve(s.size());
+    size_t i= 0, n= s.size();
+    const std::string tag= "<in_optimizer>(";
+    while (i < n)
+    {
+      if (s.compare(i, tag.size(), tag) == 0)
+      {
+        i += tag.size();
+        // Skip the first argument (everything up to the first ',' at depth 1).
+        int depth= 1;
+        while (i < n && depth > 0)
+        {
+          if      (s[i] == '(') depth++;
+          else if (s[i] == ')') { depth--; if (depth == 0) break; }
+          else if (s[i] == ',' && depth == 1) { i++; break; }
+          i++;
+        }
+        // Emit the second argument (everything up to the final closing ')').
+        depth= 1;
+        while (i < n && depth > 0)
+        {
+          if      (s[i] == '(') { depth++; out += s[i]; }
+          else if (s[i] == ')') { depth--; if (depth > 0) out += s[i]; }
+          else                    out += s[i];
+          i++;
+        }
+      }
+      else
+        out += s[i++];
+    }
+    s= out;
+  }
+
   // str_to_date(str, fmt) → strptime(str, fmt)
   // strptime() requires a constant format — can't use a macro parameter.
   s= rewrite_func_name(s, "str_to_date", "strptime");
@@ -2303,6 +2342,53 @@ static std::string rewrite_mariadb_sql(const std::string &sql)
   // fails to install.  Single-arg rename only — multi-arg CHAR() which
   // concatenates code points is rare and not handled.
   s= rewrite_func_name(s, "char", "chr");
+
+  // INTERVAL 'N' unit → INTERVAL 'N units'
+  // MariaDB's query printer emits INTERVAL 'N' UNIT (quoted integer, separate
+  // unit keyword).  DuckDB requires the number and unit in a single string:
+  // INTERVAL '90 days'.  The bare-integer form INTERVAL N UNIT is also
+  // rejected by DuckDB.  Normalise to the single-string form with plural unit.
+  // Matches: interval '<digits>' <unit_keyword>[s]
+  {
+    static const std::regex interval_quoted_re(
+      "\\binterval\\s+'(\\d+)'\\s+(year|month|week|day|hour|minute|second)s?\\b",
+      std::regex::icase);
+    // Replace with "interval 'N units'" — DuckDB's native interval string form.
+    std::string result;
+    result.reserve(s.size());
+    auto it  = std::sregex_iterator(s.begin(), s.end(), interval_quoted_re);
+    auto end = std::sregex_iterator();
+    size_t last= 0;
+    for (; it != end; ++it)
+    {
+      const std::smatch &m= *it;
+      result.append(s, last, m.position() - last);
+      result += "interval '";
+      result += m[1].str();               // digits
+      result += ' ';
+      std::string unit= m[2].str();
+      // Lowercase and pluralise.
+      for (char &c : unit) c= tolower((unsigned char)c);
+      result += unit;
+      if (unit.back() != 's') result += 's';
+      result += '\'';
+      last= m.position() + m.length();
+    }
+    result.append(s, last, s.size() - last);
+    s= std::move(result);
+  }
+
+  // DATE'YYYY-MM-DD' → DATE 'YYYY-MM-DD'
+  // MariaDB's query printer emits ANSI date literals without a space between
+  // the DATE keyword and the string (e.g. DATE'1998-12-01').  DuckDB requires
+  // a space: DATE '1998-12-01'.  Without the space DuckDB misparses it and
+  // the subsequent arithmetic produces an incorrect type.
+  {
+    static const std::regex date_nospace_re(
+      "\\bDATE'(\\d{4}-\\d{2}-\\d{2})'",
+      std::regex::icase);
+    s= std::regex_replace(s, date_nospace_re, "DATE '$1'");
+  }
 
   return s;
 }
