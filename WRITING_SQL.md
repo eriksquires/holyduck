@@ -1,6 +1,6 @@
 # Writing SQL with HolyDuck
 ---
-Please note that HolyDuck is under very active development. Therefore SQL compatability and performance is evolving rapidly and this guide may already be out of date. 
+Please note that HolyDuck is under very active development. SQL compatability and performance is evolving rapidly and therefore this guide may already be out of date. 
 
 ---
 
