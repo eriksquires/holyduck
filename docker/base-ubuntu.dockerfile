@@ -16,6 +16,7 @@ RUN --mount=type=cache,target=/var/cache/apt \
     git \
     cmake \
     build-essential \
+    gdb \
     bison \
     libncurses-dev \
     libreadline-dev \

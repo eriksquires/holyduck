@@ -22,18 +22,24 @@
 
 ### Query Pushdown
 
-HolyDuck implements three pushdown paths. EXPLAIN output tells you which fired:
+HolyDuck implements three pushdown paths. `EXPLAIN` output tells you which fired:
 
 | EXPLAIN output | When it fires | What runs in DuckDB |
 |---|---|---|
-| `PUSHED SELECT` | All tables in query are DUCKDB | Entire SELECT including GROUP BY, ORDER BY |
-| `PUSHED UNION` | All arms of UNION/INTERSECT/EXCEPT are DUCKDB | Entire set operation |
-| `PUSHED DERIVED` | CTE or subquery has at least one DUCKDB table; non-DUCKDB leaves (CTE or physical) are injected as temp tables | Entire CTE/subquery |
+| `PUSHED SELECT` | Query has at least one DuckDB table; any InnoDB tables are injected as temp tables | Entire SELECT including JOIN, GROUP BY, ORDER BY |
+| `PUSHED UNION` | All arms of UNION/INTERSECT/EXCEPT have at least one DuckDB table | Entire set operation |
+| `PUSHED DERIVED` | CTE or subquery has at least one DuckDB table; non-DuckDB leaves are injected | Entire CTE/subquery |
 
-For mixed-engine queries where pushdown cannot fire on the full query, two optimizations still apply:
+**Injection** is how HolyDuck handles InnoDB tables in a pushed query. When the select handler
+encounters an InnoDB table, it reads all rows from InnoDB and loads them into a DuckDB temp
+table for the duration of the query. DuckDB then executes the full query — including joins and
+aggregations — without knowing the source engine. This fires for both `PUSHED SELECT` and
+`PUSHED DERIVED`.
 
-- **Condition pushdown** via `cond_push()`: WHERE conditions are pushed into the DuckDB scan query, filtering rows before they reach MariaDB.
-- **Column subset scan**: `rnd_init()` reads `table->read_set` and emits `SELECT col1, col2` instead of `SELECT *`, reducing data transfer.
+The fallback path — `ha_duckdb::rnd_init()` with `cond_push()` — is used when pushdown cannot
+fire at all (e.g., unsupported query shape). In this path MariaDB drives a batched scan of the
+DuckDB table, pushing WHERE conditions into the DuckDB query and reading only the needed column
+subset. This is correct but slower than injection for cross-engine queries.
 
 ### Concurrency
 - Write locks upgraded to `TL_WRITE` in `store_lock()` — MariaDB serializes concurrent writers
@@ -50,31 +56,62 @@ Macros installed into DuckDB at startup translate MariaDB function names:
 - `CHAR(n)` rewritten to `chr(n)` in the SQL rewrite pass
 - `<cache>(expr)` wrappers from MariaDB's AST printer stripped automatically
 
-Macros live in `sql/holyduck_duckdb_extensions.sql` — edit and redeploy without recompiling.
+Macros live in `sql/holyduck_duckdb_extensions.sql` — edit and reload without recompiling.
 
-### Data Type Support
+### Data Type Mapping
+
+Type mapping happens in two directions:
+
+**MariaDB → DuckDB** (`field_type_to_duckdb()`, ~line 807): used when `CREATE TABLE ... ENGINE=DUCKDB`
+is executed. Converts `MYSQL_TYPE_*` constants to DuckDB type strings.
+
 | MariaDB Type | DuckDB Type |
 |---|---|
 | TINYINT, SMALLINT, INT, MEDIUMINT | INTEGER |
 | BIGINT | BIGINT |
 | FLOAT | FLOAT |
 | DOUBLE | DOUBLE |
-| DECIMAL | DECIMAL |
+| DECIMAL, NUMERIC | DECIMAL |
 | DATE | DATE |
 | TIME | TIME |
 | DATETIME, TIMESTAMP | TIMESTAMP |
-| VARCHAR, TEXT, BLOB, etc. | VARCHAR |
+| VARCHAR, TEXT, BLOB, and all others | VARCHAR |
 
-Type mapping happens in two places in `src/ha_duckdb.cc`:
+**DuckDB → MariaDB** (`duckdb_type_to_mariadb()`, ~line 531): used during table discovery
+(`duckdb_discover_table()`). Converts the full parameterized type string from DuckDB's
+`information_schema.columns.data_type` to a MariaDB column definition.
 
-- **DDL mapping (~line 387)** — converts `MYSQL_TYPE_*` constants to DuckDB type name strings
-  when `CREATE TABLE ... ENGINE=DUCKDB` is executed. This is the source of truth for what
-  DuckDB column type gets created on disk.
-- **Value mapping (~lines 661, 773, 1304, 1415)** — converts field values between MariaDB and
-  DuckDB representations at query time (reads and writes).
+| DuckDB Type | MariaDB Type |
+|---|---|
+| DECIMAL(p,s), NUMERIC(p,s) | DECIMAL(p,s) |
+| DECIMAL, NUMERIC (no params) | DECIMAL(18,3) |
+| VARCHAR(n), CHARACTER VARYING(n) | VARCHAR(n) |
+| VARCHAR, CHARACTER VARYING (no params) | VARCHAR(255) |
+| CHARACTER(n) | CHAR(n) |
+| TINYINT | TINYINT |
+| SMALLINT | SMALLINT |
+| INTEGER | INT |
+| BIGINT | BIGINT |
+| HUGEINT | DECIMAL(38,0) |
+| UTINYINT | TINYINT UNSIGNED |
+| USMALLINT | SMALLINT UNSIGNED |
+| UINTEGER | INT UNSIGNED |
+| UBIGINT | DECIMAL(20,0) |
+| FLOAT, REAL | FLOAT |
+| DOUBLE | DOUBLE |
+| DATE | DATE |
+| TIME, TIMETZ | TIME |
+| TIMESTAMP, DATETIME, TIMESTAMPTZ, TIMESTAMP WITH TIME ZONE | DATETIME |
+| INTERVAL | VARCHAR(64) |
+| BOOLEAN, BOOL | TINYINT(1) |
+| BLOB, BYTEA | BLOB |
+| JSON | JSON |
+| LIST, STRUCT, MAP, and other complex types | VARCHAR(255) |
 
-Note that several MariaDB integer types (TINYINT, SMALLINT, MEDIUMINT) all map to DuckDB INTEGER.
-DuckDB stores them efficiently regardless; the distinction only matters at the MariaDB display layer.
+Note: several MariaDB integer types (TINYINT, SMALLINT, MEDIUMINT) all map to DuckDB INTEGER
+on the write path. DuckDB stores them efficiently; the distinction only matters at the MariaDB
+display layer. The discovery path (`duckdb_type_to_mariadb`) maps back precisely because DuckDB
+preserves the original column type.
 
 ---
 
@@ -86,13 +123,27 @@ DuckDB stores them efficiently regardless; the distinction only matters at the M
        ▼
 [MariaDB 11.8.3]  ← standard SQL interface
        │
-       ├─ Pure-DUCKDB SELECT ──► ha_duckdb_select_handler   (PUSHED SELECT)
-       ├─ Pure-DUCKDB UNION  ──► ha_duckdb_select_handler   (PUSHED UNION)
-       ├─ DuckDB CTE/subquery ─► ha_duckdb_derived_handler  (PUSHED DERIVED)
+       ├─ Any SELECT with ≥1 DuckDB table
+       │     │
+       │     ├─ All DuckDB ──────────────► ha_duckdb_select_handler  (PUSHED SELECT)
+       │     │                               DuckDB executes natively
+       │     │
+       │     └─ Mixed DuckDB + InnoDB ──► ha_duckdb_select_handler  (PUSHED SELECT)
+       │                                    inject_table_into_duckdb()
+       │                                    InnoDB rows → DuckDB temp table
+       │                                    DuckDB executes full query
        │
-       └─ Cross-engine join  ──► ha_duckdb::rnd_init()      (batched scan)
-                                   cond_push() → WHERE in DuckDB query
-                                   read_set   → SELECT only needed columns
+       ├─ CTE/subquery with ≥1 DuckDB table
+       │     └────────────────────────────► ha_duckdb_derived_handler (PUSHED DERIVED)
+       │                                    same injection for non-DuckDB leaves
+       │
+       ├─ UNION/INTERSECT/EXCEPT (all DuckDB)
+       │     └────────────────────────────► ha_duckdb_select_handler  (PUSHED UNION)
+       │
+       └─ Fallback (no pushdown handler claimed the query)
+             └────────────────────────────► ha_duckdb::rnd_init()     (batched scan)
+                                             cond_push() → WHERE in DuckDB query
+                                             read_set   → SELECT only needed columns
        │
        ▼
 [DuckDB embedded engine]  ← libduckdb.so v1.5.0
@@ -102,12 +153,12 @@ DuckDB stores them efficiently regardless; the distinction only matters at the M
 ```
 
 ### Intentional Design: No MariaDB Index Scans
-`index_flags()` returns no read-capability bits. MariaDB cannot plan row-at-a-time
-index scans against DuckDB tables. This is deliberate:
-- Exposing index capability would allow the optimizer to drive index scans through the
-  handler API, bypassing DuckDB's vectorised execution entirely.
+`index_flags()` returns no read-capability bits. MariaDB cannot plan row-at-a-time index scans
+against DuckDB tables. This is deliberate:
+- Exposing index capability would allow the optimizer to drive index scans through the handler
+  API, bypassing DuckDB's vectorized execution entirely.
 - DuckDB's own planner uses indexes internally on pushed-down queries.
-- Cross-engine joins use `type=ALL` + a single batched `rnd_init()` call, which is correct.
+- The fallback path uses `type=ALL` + a single batched `rnd_init()` call, which is correct.
 - `max_supported_keys()` returns 64 so MariaDB accepts index DDL; it just never uses them.
 
 ### Intentional Design: No Column Type Changes
@@ -138,8 +189,8 @@ systemctl start mariadb
 
 Because `global.duckdb` is a standard DuckDB database file, any DuckDB client can open it
 directly in read-only mode while MariaDB is running. This can be handy for exploratory analysis
-but is potentially messy — you now have two control planes accessing the same data, which requires
-care around coordination. Read-only mode is required; MariaDB holds the write lock.
+but means two control planes are accessing the same data — read-only mode is required since
+MariaDB holds the write lock.
 
 For administrative work — bulk loads, schema changes, repairs, or copying data between DuckDB
 databases — stop MariaDB first, do the work with any DuckDB client, then bring MariaDB back up.
@@ -148,11 +199,8 @@ databases — stop MariaDB first, do the work with any DuckDB client, then bring
 
 ## System Variables
 
-Because MariaDB doesn't have any way to expose DuckDB methods directly we're cheating and using the SET GLOBAL variables as 
-functions to let you administer DuckDB without restarting MariaDB.  The most useful one is  `SET GLOBAL duckdb_reload_extensions=1`
-which will reload the extensions file on the fly. 
-
-Here is the complete list:
+MariaDB has no native way to expose DuckDB methods, so HolyDuck uses `SET GLOBAL` variables as
+a command interface for DuckDB administration without restarting MariaDB.
 
 | Variable | Type | Description |
 |---|---|---|
@@ -188,7 +236,6 @@ SHOW ENGINE DUCKDB STATUS;
 |---|---|
 | Column type changes | Not supported — use add/populate/rename/drop pattern |
 | `INSERT ... ON DUPLICATE KEY UPDATE` | Not supported |
-| Aggregation pushdown (cross-engine) | Use CTE pattern above — `PUSHED DERIVED` handles it |
 | Bulk INSERT constraint errors | Returns error 1030 instead of 1022 (batch rejected, correct behavior) |
 | High availability / replication | Not supported — single node only |
 | Multiple concurrent writers | Single writer at a time (DuckDB limitation) |
@@ -203,9 +250,9 @@ SHOW ENGINE DUCKDB STATUS;
 │   ├── ha_duckdb.h               # Header
 │   └── CMakeLists.txt            # Standalone cmake build
 ├── sql/
-│   ├── holyduck_duckdb_extensions.sql   # DuckDB extensions, macros, and views (loaded into DuckDB at startup)
+│   ├── holyduck_duckdb_extensions.sql   # DuckDB macros and views (loaded into DuckDB at startup)
 │   ├── holyduck_mariadb_functions.sql   # MariaDB stored functions (install once per database)
-│   └── holyduck_mariadb_tables.sql      # MariaDB table stubs for DuckDB-native views (install once per database)
+│   └── holyduck_mariadb_tables.sql      # MariaDB table stubs for DuckDB-native views
 ├── docker/
 │   ├── base-ubuntu.dockerfile
 │   ├── base-oracle8.dockerfile
@@ -214,9 +261,15 @@ SHOW ENGINE DUCKDB STATUS;
 ├── scripts/
 │   ├── fetch-deps.sh             # Download MariaDB source + DuckDB library
 │   ├── build-base.sh             # Build Docker base image
-│   ├── docker-run.sh             # Start dev container
-│   ├── cmake-setup.sh            # Build MariaDB + configure plugin cmake
-│   └── deploy.sh                 # Build plugin + deploy into container
+│   ├── docker-run.sh             # Start dev container (per-distro, handles plugin-out mount)
+│   ├── cmake-setup.sh            # Build MariaDB + configure plugin cmake (one-time per distro)
+│   ├── deploy.sh                 # Build plugin inside running container
+│   └── build-all.pl              # Build release artifacts for all distros (ubuntu, oracle8, oracle9)
+├── debug/
+│   ├── gdb-attach.sh             # Attach GDB to the running MariaDB process with symbols loaded
+│   └── watch-init-scan.gdb       # GDB script: break on init_scan, print SQL and injection events
+├── tests/
+│   └── regression/               # SQL regression suite (setup.sql, teardown.sql, test cases)
 └── lib/                          # gitignored — populated by fetch-deps.sh
     ├── libduckdb.so
     ├── duckdb.hpp

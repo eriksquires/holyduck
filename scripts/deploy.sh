@@ -58,15 +58,19 @@ BUILD_SUBDIR="$(basename "${BUILD_DIR}")"
 docker exec "${CONTAINER}" bash -c \
     "make -j\$(nproc) -C /plugin-src/${BUILD_SUBDIR} 2>&1" \
     | grep -E "error:|warning:|Built target|Error" || true
-[[ -f "${BUILD_DIR}/libha_duckdb.so" ]] || die "Build failed — libha_duckdb.so not found."
-ok "Build complete: $(ls -sh "${BUILD_DIR}/libha_duckdb.so" | awk '{print $1}')"
+# cmake now outputs ha_duckdb.so directly to /usr/lib/mysql/plugin (bind-mount)
+SO_PATH="${PLUGIN_DEST}/ha_duckdb.so"
+[[ -f "${SO_PATH}" ]] || SO_PATH="${BUILD_DIR}/ha_duckdb.so"
+[[ -f "${SO_PATH}" ]] || die "Build failed — ha_duckdb.so not found in plugin dir or build dir."
+ok "Build complete: $(ls -sh "${SO_PATH}" | awk '{print $1}')"
 
-# ── 4. Copy plugin and companion SQL file ─────────────────────────────────────
-info "Copying plugin into container..."
-docker cp "${BUILD_DIR}/libha_duckdb.so"            "${CONTAINER}:${PLUGIN_DEST}/ha_duckdb.so"
-docker cp "${BUILD_DIR}/holyduck_duckdb_extensions.sql"  "${CONTAINER}:${PLUGIN_DEST}/holyduck_duckdb_extensions.sql"
-docker cp "${PLUGIN_DIR}/sql/holyduck_mariadb_functions.sql" "${CONTAINER}:${PLUGIN_DEST}/holyduck_mariadb_functions.sql"
-ok "Files copied."
+# ── 4. Verify output landed in the plugin dir ─────────────────────────────────
+# cmake outputs ha_duckdb.so directly to /usr/lib/mysql/plugin (bind-mounted
+# to plugin-out-<distro> on the host) so no copy step is needed.
+[[ -f "${PLUGIN_DEST}/ha_duckdb.so" ]] \
+    || [[ -f "${BUILD_DIR}/ha_duckdb.so" ]] \
+    || die "ha_duckdb.so not found in plugin dir or build dir."
+ok "Plugin is in place."
 
 # ── 5. Restart MariaDB ────────────────────────────────────────────────────────
 info "Restarting MariaDB..."

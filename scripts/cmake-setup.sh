@@ -75,6 +75,8 @@ docker exec "${CONTAINER}" bash -c "
     cmake ../src \
         -DMARIADB_SOURCE_DIR=/mariadb-src \
         -DMARIADB_BUILD_DIR=/mariadb-src/${MARIADB_BUILD_SUBDIR} \
+        -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+        -DCMAKE_LIBRARY_OUTPUT_DIRECTORY=/usr/lib/mysql/plugin \
         2>&1
 "
 

@@ -7,7 +7,7 @@
 SET GLOBAL duckdb_execute_sql = 'DROP TABLE IF EXISTS "hd_regression"."macro_inputs"';
 SET GLOBAL duckdb_execute_sql = 'DROP TABLE IF EXISTS "hd_regression"."products"';
 SET GLOBAL duckdb_execute_sql = 'DROP TABLE IF EXISTS "hd_regression"."sales"';
-DROP DATABASE IF EXISTS hd_regression;
+DROP DATABASE IF EXISTS hd_regression;  -- InnoDB tables (nation, region, part, supplier) dropped here
 FLUSH TABLES;
 
 CREATE DATABASE hd_regression;
@@ -21,6 +21,12 @@ RETURN FROM_UNIXTIME(FLOOR(UNIX_TIMESTAMP(dt) / bucket_secs) * bucket_secs);
 -- InnoDB dimension tables
 CREATE TABLE categories (id INT PRIMARY KEY, name VARCHAR(50)) ENGINE=InnoDB;
 CREATE TABLE regions    (id INT PRIMARY KEY, name VARCHAR(50)) ENGINE=InnoDB;
+
+-- InnoDB copies of TPC-H dimension tables (for mixed-engine join tests)
+CREATE TABLE nation    AS SELECT * FROM tpch.nation;
+CREATE TABLE region    AS SELECT * FROM tpch.region;
+CREATE TABLE part      AS SELECT * FROM tpch.part;
+CREATE TABLE supplier  AS SELECT * FROM tpch.supplier;
 
 INSERT INTO categories VALUES (1,'Electronics'),(2,'Clothing'),(3,'Food');
 INSERT INTO regions    VALUES (1,'North'),(2,'South'),(3,'East');

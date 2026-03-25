@@ -21,6 +21,26 @@ CONTAINER_NAME="duckdb-plugin-dev-${DISTRO}"
 DATA_DIR="${PLUGIN_DIR}/data-${DISTRO}"
 mkdir -p "${DATA_DIR}"
 
+# Per-distro plugin output directory — mounted directly onto MariaDB's plugin dir
+# so cmake --build is the only step needed; no cp required.
+PLUGIN_OUT_DIR="${PLUGIN_DIR}/plugin-out-${DISTRO}"
+mkdir -p "${PLUGIN_OUT_DIR}"
+
+# Detect the plugin directory path inside the image (differs by distro).
+PLUGIN_SYSTEM_DIR=$(docker run --rm "mariadb-duckdb-base:${DISTRO}" \
+    bash -c "mariadbd --verbose --help 2>/dev/null | awk '/^plugin.dir/{print \$2; exit}'" 2>/dev/null \
+    || echo "/usr/lib/mysql/plugin")
+
+# Pre-populate with the image's stock plugins if empty (first run only).
+# Without this the volume mount would hide InnoDB, Aria, etc.
+if [ -z "$(ls -A "${PLUGIN_OUT_DIR}" 2>/dev/null)" ]; then
+    echo "Populating ${PLUGIN_OUT_DIR} from image (${PLUGIN_SYSTEM_DIR})..."
+    docker run --rm "mariadb-duckdb-base:${DISTRO}" \
+        tar -C "${PLUGIN_SYSTEM_DIR}" -cf - . \
+        | tar -C "${PLUGIN_OUT_DIR}" -xf -
+    echo "Done."
+fi
+
 echo "Starting MariaDB DuckDB Plugin development environment ($DISTRO)..."
 
 # Only one duckdb-plugin-dev-* container runs at a time (port 3306 is shared).
@@ -40,7 +60,9 @@ else
         -v "${PLUGIN_DIR}:/plugin-src" \
         -v "${MARIADB_SRC_DIR}:/mariadb-src:ro" \
         -v "${DATA_DIR}:/var/lib/mysql" \
+        -v "${PLUGIN_OUT_DIR}:${PLUGIN_SYSTEM_DIR}" \
         -p 3306:3306 \
+        --cap-add=SYS_PTRACE \
         --name "$CONTAINER_NAME" \
         "mariadb-duckdb-base:${DISTRO}" \
         bash -c "/usr/local/bin/start-mariadb.sh && sleep infinity"

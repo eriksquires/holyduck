@@ -21,13 +21,15 @@ use Cwd qw(abs_path);
 # Config
 # ---------------------------------------------------------------------------
 
-my $PLUGIN_DIR = abs_path(dirname(__FILE__) . "/..");
-my $OUTPUT_DIR = abs_path($ARGV[0] // "$PLUGIN_DIR/release-binaries");
+my $PLUGIN_DIR  = abs_path(dirname(__FILE__) . "/..");
+my $OUTPUT_RAW  = $ARGV[0] // "$PLUGIN_DIR/release-binaries";
+make_path($OUTPUT_RAW);
+my $OUTPUT_DIR  = abs_path($OUTPUT_RAW);
 
 my @DISTROS = (
-    { name => "ubuntu",  container => "duckdb-plugin-dev-ubuntu",  binary => "build/libha_duckdb.so"         },
-    { name => "oracle8", container => "duckdb-plugin-dev-oracle8",  binary => "build-oracle8/libha_duckdb.so" },
-    { name => "oracle9", container => "duckdb-plugin-dev-oracle9",  binary => "build-oracle9/libha_duckdb.so" },
+    { name => "ubuntu",  container => "duckdb-plugin-dev-ubuntu",  build_subdir => "build",         mariadb_build => "build"        },
+    { name => "oracle8", container => "duckdb-plugin-dev-oracle8",  build_subdir => "build-oracle8", mariadb_build => "build" },
+    { name => "oracle9", container => "duckdb-plugin-dev-oracle9",  build_subdir => "build-oracle9", mariadb_build => "build" },
 );
 
 # ---------------------------------------------------------------------------
@@ -62,9 +64,10 @@ print "\n";
 my @built;
 
 for my $d (@DISTROS) {
-    my $name      = $d->{name};
-    my $container = $d->{container};
-    my $binary    = "$PLUGIN_DIR/$d->{binary}";
+    my $name         = $d->{name};
+    my $container    = $d->{container};
+    my $build_subdir = $d->{build_subdir};
+    my $mariadb_build= $d->{mariadb_build};
 
     info "=== Building $name ===";
 
@@ -72,7 +75,7 @@ for my $d (@DISTROS) {
     info "Starting container $container...";
     run("MARIADB_SRC_DIR=$ENV{MARIADB_SRC_DIR} $PLUGIN_DIR/scripts/docker-run.sh $name");
 
-    # Wait for MariaDB to be ready before deploying
+    # Wait for MariaDB to be ready before building
     info "Waiting for MariaDB to be ready...";
     my $ready = 0;
     for (1..30) {
@@ -83,11 +86,26 @@ for my $d (@DISTROS) {
     die "MariaDB in $container did not start within 30 seconds\n" unless $ready;
     ok "MariaDB is ready.";
 
-    # Build and deploy
-    info "Building and deploying...";
-    run("$PLUGIN_DIR/scripts/deploy.sh $container");
+    # Configure for Release (no debug symbols) with output into build subdir
+    info "Configuring cmake (Release)...";
+    run(qq{docker exec $container bash -c "
+        mkdir -p /plugin-src/$build_subdir && \\
+        cmake /plugin-src/src \\
+          -B /plugin-src/$build_subdir \\
+          -DMARIADB_SOURCE_DIR=/mariadb-src \\
+          -DMARIADB_BUILD_DIR=/mariadb-src/$mariadb_build \\
+          -DCMAKE_BUILD_TYPE=Release \\
+          -DCMAKE_LIBRARY_OUTPUT_DIRECTORY=/plugin-src/$build_subdir \\
+          2>&1 | tail -3
+    "});
 
-    # Copy binary
+    # Build
+    info "Building...";
+    run(qq{docker exec $container bash -c "cmake --build /plugin-src/$build_subdir -j\$(nproc) 2>&1 | tail -3"});
+
+    # Copy binary — cmake outputs ha_duckdb.so (no lib prefix, see CMakeLists.txt PREFIX "")
+    my $binary = "$PLUGIN_DIR/$build_subdir/ha_duckdb.so";
+    die "Build failed — $binary not found\n" unless -f $binary;
     my $dest = "$OUTPUT_DIR/ha_duckdb-$name.so";
     run("cp $binary $dest");
     my $size = -s $dest;
@@ -97,10 +115,21 @@ for my $d (@DISTROS) {
     print "\n";
 }
 
+# Copy SQL files — same for all distros, copy once
+for my $sql_file (qw(holyduck_duckdb_extensions.sql holyduck_mariadb_functions.sql)) {
+    my $src = "$PLUGIN_DIR/sql/$sql_file";
+    die "SQL file not found: $src\n" unless -f $src;
+    run("cp $src $OUTPUT_DIR/$sql_file");
+    ok "Copied $sql_file";
+}
+
 # Restore ubuntu as the default active container
 info "Restoring ubuntu container as active...";
 run_or_warn("MARIADB_SRC_DIR=$ENV{MARIADB_SRC_DIR} $PLUGIN_DIR/scripts/docker-run.sh ubuntu");
 
 print "\n";
-ok "All builds complete. Binaries:";
+ok "All builds complete.";
+print "\n  Binaries:\n";
 print "    $_\n" for @built;
+print "\n  SQL files:\n";
+print "    $OUTPUT_DIR/$_\n" for qw(holyduck_duckdb_extensions.sql holyduck_mariadb_functions.sql);

@@ -526,21 +526,61 @@ static int duckdb_done_func(void *)
 // base tables and views — MariaDB never needs to know the difference.
 // ---------------------------------------------------------------------------
 
-// Map a DuckDB data_type string (from information_schema) to a MariaDB type name.
-static const char *duckdb_type_to_mariadb(const std::string &dtype)
+// Map a DuckDB data_type string (from information_schema.columns) to a MariaDB type.
+// DuckDB embeds precision/scale directly in data_type, e.g. "DECIMAL(15,2)", "VARCHAR".
+static std::string duckdb_type_to_mariadb(const std::string &dtype)
 {
-  if (dtype == "BIGINT")                          return "BIGINT";
-  if (dtype == "INTEGER" || dtype == "INT")       return "INT";
-  if (dtype == "SMALLINT" || dtype == "HUGEINT")  return "BIGINT";
-  if (dtype == "TINYINT")                         return "TINYINT";
-  if (dtype == "FLOAT")                           return "FLOAT";
-  if (dtype == "DOUBLE" || dtype == "DECIMAL")    return "DOUBLE";
-  if (dtype == "DATE")                            return "DATE";
-  if (dtype == "TIME")                            return "TIME";
-  if (dtype == "TIMESTAMP" || dtype == "TIMESTAMP WITH TIME ZONE")
-                                                  return "DATETIME";
-  if (dtype == "BOOLEAN")                         return "TINYINT";
-  // Default: treat unknown types as VARCHAR
+  // Helper: strip spaces from "(p, s)" params and return "DECIMAL(p,s)" etc.
+  auto with_params= [&](const std::string &base) -> std::string {
+    size_t open= dtype.find('(');
+    if (open == std::string::npos) return base;
+    std::string r= base;
+    for (size_t i= open; i < dtype.size(); i++)
+      if (dtype[i] != ' ') r += dtype[i];
+    return r;
+  };
+
+  // Prefix-matched parameterised types (data_type includes "(p,s)" or "(n)")
+  if (dtype.find("DECIMAL") == 0 || dtype.find("NUMERIC") == 0)
+    return dtype.find('(') != std::string::npos ? with_params("DECIMAL") : "DECIMAL(18,3)";
+  if (dtype.find("CHARACTER VARYING") == 0)
+    return dtype.find('(') != std::string::npos ? with_params("VARCHAR") : "VARCHAR(255)";
+  if (dtype.find("VARCHAR") == 0)
+    return dtype.find('(') != std::string::npos ? with_params("VARCHAR") : "VARCHAR(255)";
+  if (dtype.find("CHARACTER") == 0)   // must come after CHARACTER VARYING
+    return dtype.find('(') != std::string::npos ? with_params("CHAR") : "CHAR(1)";
+
+  // Integer family
+  if (dtype == "BIGINT")              return "BIGINT";
+  if (dtype == "INTEGER")             return "INT";
+  if (dtype == "SMALLINT")            return "SMALLINT";
+  if (dtype == "TINYINT")             return "TINYINT";
+  if (dtype == "HUGEINT")             return "DECIMAL(38,0)"; // 128-bit, no direct equivalent
+  if (dtype == "UBIGINT")             return "DECIMAL(20,0)";
+  if (dtype == "UINTEGER")            return "INT UNSIGNED";
+  if (dtype == "USMALLINT")           return "SMALLINT UNSIGNED";
+  if (dtype == "UTINYINT")            return "TINYINT UNSIGNED";
+
+  // Floating-point
+  if (dtype == "FLOAT" || dtype == "REAL")  return "FLOAT";
+  if (dtype == "DOUBLE")                    return "DOUBLE";
+
+  // Date/time
+  if (dtype == "DATE")                      return "DATE";
+  if (dtype == "TIME" || dtype == "TIMETZ") return "TIME";
+  if (dtype == "TIMESTAMP" || dtype == "DATETIME" ||
+      dtype == "TIMESTAMP WITH TIME ZONE"  ||
+      dtype == "TIMESTAMPTZ")               return "DATETIME";
+  if (dtype == "INTERVAL")                  return "VARCHAR(64)";
+
+  // Boolean
+  if (dtype == "BOOLEAN" || dtype == "BOOL") return "TINYINT(1)";
+
+  // Binary / JSON
+  if (dtype == "BLOB" || dtype == "BYTEA")  return "BLOB";
+  if (dtype == "JSON")                      return "JSON";
+
+  // Unknown/complex (LIST, STRUCT, MAP, etc.) — approximate as VARCHAR
   return "VARCHAR(255)";
 }
 
@@ -666,6 +706,8 @@ static int duckdb_discover_table(handlerton *hton, THD *thd, TABLE_SHARE *share)
   try
   {
     duckdb::Connection conn(*db);
+    // data_type in DuckDB's information_schema includes precision/scale inline,
+    // e.g. "DECIMAL(15,2)", "VARCHAR" (no length for unbounded), "BIGINT".
     std::string sql=
       "SELECT column_name, data_type "
       "FROM information_schema.columns "
@@ -2796,6 +2838,38 @@ int ha_duckdb_select_handler::init_scan()
     const char *qstr= thd->query();
     size_t qlen= thd->query_length();
     sql.assign(qstr ? qstr : "", qlen);
+
+    // CTAS: thd->query() is the full "CREATE TABLE ... AS SELECT ..." DDL.
+    // Strip everything up to and including the AS keyword so DuckDB only
+    // receives the SELECT (or WITH) portion.
+    {
+      // Scan for " AS " followed by SELECT or WITH (case-insensitive).
+      size_t n= sql.size();
+      for (size_t i= 0; i + 4 < n; i++)
+      {
+        if (tolower((unsigned char)sql[i])   == 'a' &&
+            tolower((unsigned char)sql[i+1]) == 's' &&
+            isspace((unsigned char)sql[i+2]))
+        {
+          size_t j= i + 3;
+          while (j < n && isspace((unsigned char)sql[j])) j++;
+          // Check the next keyword is SELECT or WITH
+          auto starts_with_kw= [&](const char *kw, size_t klen) {
+            if (j + klen > n) return false;
+            for (size_t k= 0; k < klen; k++)
+              if (tolower((unsigned char)sql[j+k]) != kw[k]) return false;
+            // Must be followed by whitespace or end
+            return (j + klen >= n || !isalnum((unsigned char)sql[j+klen]));
+          };
+          if (starts_with_kw("select", 6) || starts_with_kw("with", 4))
+          {
+            sql= sql.substr(j);
+            break;
+          }
+        }
+      }
+    }
+
     sql= rewrite_original_sql(sql);
 
     // Point DuckDB at the correct schema for unqualified table names.

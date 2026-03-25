@@ -1,21 +1,26 @@
 # Writing SQL with HolyDuck
 ---
-Please note that HolyDuck is under very active development. SQL compatability and performance is evolving rapidly and therefore this guide may already be out of date. 
+Please note that HolyDuck is under very active development. SQL compatibility and performance
+are evolving rapidly, and this guide may already be out of date.
 
 ---
 
 ## Introduction
 
-The guidance in this document comes from our choice not to re-write a SQL parser or cost-based optimizer.   For our use cases we felt we could achieve our major goals with macros and a little manual SQL re-writing.  Here we'll discuss:
+We chose not to rewrite a SQL parser or cost-based optimizer. For our use cases we felt we
+could achieve our major goals with macros and a little manual SQL rewriting. Here we'll cover:
 
 - How to write SQL which doesn't fail
-- Optimizing SQL queries for cross-engine joins
+- How cross-engine joins work, and when to think about query shape
 - Extending HolyDuck with custom features
 - Leveraging views
 
 ## SQL Dialect
 
-**All SQL passes through MariaDB's parser first**. If MariaDB doesn't recognize the syntax or function, it will never reach DuckDB — not even inside a subquery or CTE. This has practical consequences for what you can and cannot write. For overcoming functional incompatibility, see the **Extending HolyDuck** section below.
+**All SQL passes through MariaDB's parser first**. If MariaDB doesn't recognize the syntax or
+function, it will never reach DuckDB — not even inside a subquery or CTE. This has practical
+consequences for what you can and cannot write. For overcoming functional incompatibility, see
+the **Extending HolyDuck** section below.
 
 ### What MariaDB blocks
 
@@ -31,58 +36,46 @@ We'll cover working around these limitations below in **Extending HolyDuck.**
 
 ### What gets through
 
-SQL that is valid MariaDB syntax and verbs will reach DuckDB, whether or not DuckDB can execute it or not.  DuckDB may then throw an error. 
+SQL that is valid MariaDB syntax will reach DuckDB, whether or not DuckDB can execute it.
+DuckDB may then throw an error.
 
 ---
 
-## Optimizing Queries for HolyDuck
-When your query uses tables which are both in and out of DuckDB some attention to the query shape will yield big performance improvements.
+## Cross-Engine Joins
 
-Single engine queries will run as you expect, either all in MariaDB or all in DuckDB.
+When your query uses tables in both DuckDB and InnoDB, HolyDuck handles it by injecting the
+InnoDB tables as temporary tables inside DuckDB, then pushing the entire query to DuckDB as a
+single unit (`PUSHED SELECT`). DuckDB executes the full join and aggregation natively — the
+same as if both tables were in DuckDB to begin with.
 
-Generally speaking, MariaDB can only push down WHERE conditions which are entirely in one
-engine or another but filters that depend on values from external (non-duck) tables
-(e.g. `WHERE s.id = c.id`) won't be.  Instead MariaDB will push down all the filters it can,
-retrieve the rows and then apply any missing filter conditions.  Honestly this is not deathly
-slow, but also not optimal.
-
-Fortunately we _can_ write SQL in a way that works around this bottleneck.
-
-The solution is to restructure the query so the heavy DuckDB work happens in a CTE or
-subquery first — then `PUSHED DERIVED` fires and the entire aggregation runs inside DuckDB,
-returning a small result for MariaDB to join against InnoDB.
-
-### Example: Sales Analysis
-
-Suppose you have:
-- `sales` — DuckDB table, millions of rows (order_id, product_id, category_id, region_id, amount, ts)
-- `categories` — InnoDB table, small (id, name)
-- `regions` — InnoDB table, small (id, name)
-
-**Naive query — slow:**
+For the typical HolyDuck workload — large DuckDB fact tables joined against small InnoDB
+dimension tables — this just works. Write your queries naturally.
 
 ```sql
 SELECT c.name AS category,
        r.name AS region,
        SUM(s.amount) AS total_sales,
        COUNT(*) AS order_count
-FROM sales s  -- DuckDB table
+FROM sales s
    JOIN categories c ON s.category_id = c.id
    JOIN regions r ON s.region_id = r.id
-WHERE
-   s.ts BETWEEN '2026-01-01' AND '2026-03-31'
+WHERE s.ts BETWEEN '2026-01-01' AND '2026-03-31'
 GROUP BY c.name, r.name
 ORDER BY total_sales DESC;
 ```
 
-What happens: MariaDB pushes the only filter it can (date and time) into DuckDB, but the GROUP BY runs in MariaDB after the join, meaning potentially
-hundreds of thousands of filtered rows flow across the engine boundary before aggregation happens.
+HolyDuck injects `categories` and `regions` into DuckDB and DuckDB runs the whole thing.
+When you `EXPLAIN` a cross-engine query, `PUSHED SELECT` confirms DuckDB is doing the work.
 
-**Optimized with CTE — fast:**
+### When to Think About Query Shape
+
+The one case worth considering is a genuinely large InnoDB table. Injection reads the entire
+InnoDB table and copies it into DuckDB. If that table has millions of rows, pre-aggregating the
+DuckDB side first via a CTE can help — DuckDB produces a small result set, and MariaDB joins
+that against InnoDB using its own indexes rather than copying the whole table across.
 
 ```sql
 WITH sales_summary AS (
-   -- This happens 100% in DuckDB
     SELECT category_id,
            region_id,
            SUM(amount) AS total_sales,
@@ -91,9 +84,6 @@ WITH sales_summary AS (
     WHERE ts BETWEEN '2026-01-01' AND '2026-03-31'
     GROUP BY category_id, region_id
 )
---
--- sales_summary is a tiny number of rows
---
 SELECT c.name AS category,
        r.name AS region,
        ss.total_sales,
@@ -103,67 +93,52 @@ JOIN categories c ON ss.category_id = c.id
 JOIN regions r ON ss.region_id = r.id
 ORDER BY ss.total_sales DESC;
 ```
-Think of the CTE as defining the execution boundary: everything inside runs in DuckDB.
 
-What happens: `PUSHED DERIVED` fires on `sales_summary`. DuckDB scans `sales`, applies the
-date filter, aggregates by region_id and category_id and returns one row per (category_id,
-region_id) pair — perhaps 50 rows for 5 categories × 10 regions. MariaDB then joins those
-50 rows against the small InnoDB tables.
+Here `PUSHED DERIVED` fires on `sales_summary` — DuckDB aggregates to ~50 rows, and MariaDB
+joins those against InnoDB. No large injection needed.
 
-When you explain your queries look for `select_type: PUSHED DERIVED` — that confirms DuckDB is doing the work.
-
-Honestly though, often you won't even feel this pain, so we suggest waiting until you feel it before you optimize.
-In our testing, even when DuckDB brought back half a million rows performance was still usable.  Say 4 seconds vs.
-under 1.  I mean, yes, faster is good, but don't derail your train of thought until you have to.
-
-### The General Rule
-
-Whenever you have a large DuckDB table joining against InnoDB:
-
-1. Move all DuckDB scanning, filtering, and aggregation into a CTE or subquery (same benefit)
-2. Join the CTE result (small) against InnoDB (also small)
-3. MariaDB only touches small row counts on both sides
-
-This pattern works for any depth of aggregation — daily buckets, percentiles, window functions,
-`RoundDateTime` time bucketing — as long as the CTE references only DuckDB tables.
+Wait until you feel actual performance pain before restructuring queries. Most workloads won't
+need it.
 
 
 ---
 
 ## Extending HolyDuck
 
-HolyDuck can be extended by editing `holyduck_duckdb_extensions.sql`.  This file runs when MariaDB starts and runs it directly in DuckDB, so any SQL that runs in DuckDB will work here, which includes macros and view creation.
+HolyDuck can be extended by editing `holyduck_duckdb_extensions.sql`. This file is executed
+directly inside DuckDB at MariaDB startup, so any valid DuckDB SQL works here — including
+macros and view creation.
 
-### Function Translation - MariaDB to DuckDB
+### Function Translation — MariaDB to DuckDB
 
-Where possible we put common MariaDB functions which don't exist in DuckDB in `holyduck_duckdb_extensions.sql` which includes functions such as:
+Where MariaDB functions have no DuckDB equivalent, we provide DuckDB macros in
+`holyduck_duckdb_extensions.sql`:
 
 - `DATE_FORMAT`
--  `IFNULL`
-- `DATEDIFF` 
-- `RoundDateTime` (OK, this isn't a standard function but it should be)
+- `IFNULL`
+- `DATEDIFF`
+- `RoundDateTime` (not a standard function, but it should be)
 - etc.
 
-### Function Pass Through - DuckDB to MariaDB
+### Function Pass-Through — DuckDB to MariaDB
 
-In addition to giving DuckDB some MariaDB functions we also sometimes need to be able to call DuckDB functions which have no equivalent in MariaDB. The problem is that MariaDB's parser will reject any unknown function before the SQL is pushed down to DuckDB.
+Sometimes you need to call a DuckDB function that has no equivalent in MariaDB. The problem
+is that MariaDB's parser will reject any unknown function before the SQL is pushed down to
+DuckDB.
 
-The solution is a **dual implementation** across both engines.  For DuckDB we provide a convenience .sql file:
+The solution is a **dual implementation** across both engines:
 
 **`sql/holyduck_duckdb_extensions.sql`** — loaded into DuckDB automatically at plugin startup.
-DuckDB sees this. This is loaded directly by HolyDuck into DuckDB, bypassing MariaDB entirely.
-
-To make MariaDB aware of DuckDB functions we provide sample SQL in: 
+DuckDB sees this, bypassing MariaDB entirely.
 
 **`sql/holyduck_mariadb_functions.sql`** — installed by the user into each MariaDB database.
 MariaDB sees this. It satisfies the parser and provides a fallback for non-DuckDB tables.
 
 ### RoundDateTime()
 
-We do a lot of time series analysis and downsampling of metrics so we use a function RoundDateTime()
-that takes arbitrary seconds size buckets to round down to such as 60, 300, 600, etc. We'll use it
-here as an example.  Maybe we only care about it in DuckDB but in order for DuckDB to receive the
-SQL with it we must make MariaDB aware of it.
+We do a lot of time-series analysis and downsampling of metrics, so we use `RoundDateTime()`
+to round timestamps to arbitrary second-size buckets: 60, 300, 600, etc. We'll use it here
+as an example.
 
 `holyduck_duckdb_extensions.sql` contains the DuckDB macro:
 ```sql
@@ -171,12 +146,11 @@ CREATE OR REPLACE MACRO rounddatetime(dt, bucket_secs) AS
     time_bucket(to_seconds(CAST(bucket_secs AS BIGINT)), dt::TIMESTAMP);
 ```
 
-The problem at this point is that MariaDB won't pass RoundDateTime to DuckDB yet.  It will
-see it as a missing or undeclared function.  We get around this by ALSO creating it for
-MariaDB.
+MariaDB won't pass `RoundDateTime` to DuckDB until it recognizes it. We get around this by
+also creating it as a MariaDB stored function.
 
-The user will have to install these functions per DB when needed, HolyDuck does not
-automatically install them (unlike the DuckDB macros).
+The user installs these functions per-database as needed — HolyDuck does not install them
+automatically (unlike the DuckDB macros).
 
 `holyduck_mariadb_functions.sql` contains the MariaDB stored function:
 ```sql
@@ -184,19 +158,18 @@ CREATE FUNCTION IF NOT EXISTS RoundDateTime(dt DATETIME, bucket_secs INT)
 RETURNS DATETIME DETERMINISTIC
 RETURN FROM_UNIXTIME(FLOOR(UNIX_TIMESTAMP(dt) / bucket_secs) * bucket_secs);
 ```
-Notice that the definition is slightly different, as the DuckDB macro is optimized
-for DuckDB but they are functionally equivalent.
 
-We'll now go through why and how these two definitions work in different scenarios.
+The DuckDB macro and MariaDB stored function are functionally equivalent but independently
+optimized for their respective engines.
 
 ### Execution of RoundDateTime() in DuckDB
 Query against a DuckDB table:
 ```sql
 SELECT RoundDateTime(ts, 300) FROM duckdb_metrics;
 ```
-MariaDB recognizes `RoundDateTime` via the stored function, which keeps it from throwing a
-SQL error, then the pushdown fires. DuckDB receives the query and resolves `rounddatetime`
-against its own macro — `time_bucket()` runs. The stored function is never called.
+MariaDB recognizes `RoundDateTime` via the stored function, suppressing the parser error, then
+pushdown fires. DuckDB receives the query and resolves `rounddatetime` against its own macro —
+`time_bucket()` runs. The stored function is never called.
 
 ### Execution of RoundDateTime() in InnoDB
 
@@ -210,27 +183,29 @@ The DuckDB macro is never involved.
 ---
 
 This pattern works for any function that has equivalent logic in both engines. If a correct
-MariaDB fallback is not feasible, the stored function can instead raise an explicit error with
+MariaDB fallback is not feasible, the stored function can raise an explicit error with
 `SIGNAL SQLSTATE '45000'` rather than returning silently wrong results.
 
-HolyDuck has a sample SQL file with supported MariaDB stored functions: holyduck_mariadb_functions.sql
-which includes RoundDateTime()
-
-We should point out that dual entries are only needed for NEW functions or features not in MariaDB.  In cases
-when the issue is DuckDB lacks a function which exists in MariaDB you only need to create a new macro and reload
-the extensions file.
+Note that dual entries are only needed for functions that are new to MariaDB. When the issue
+is the reverse — DuckDB lacks a function that exists in MariaDB — you only need to create a
+macro in `holyduck_duckdb_extensions.sql` and reload it.
 
 ## Views
 
-You may create normal MariaDB views via MariaDB and if you follow our guidelines for **Optimizing Queries for HolyDuck** from above you'll reap the same benefits.  On the other hand, if you create DuckDB views in `holyduck_duckdb_extensions.sql` you can take full advantage of DuckDB syntax and features. 
+You may create standard MariaDB views over DuckDB tables — HolyDuck pushes queries through
+them the same as direct queries. Alternatively, creating DuckDB views inside
+`holyduck_duckdb_extensions.sql` lets you use the full DuckDB SQL dialect.
 
-HolyDuck exposes DuckDB views as tables, which is a bit of a lie but so long as you don't accidentally attempt to write to them no errors should occur.  
+HolyDuck exposes DuckDB views as queryable tables. They cannot be written to.
 
-To be clear, there is no natural performance benefit from using DuckDB views vs. MariaDB, the benefit of DuckDB views is from the expanded syntax.
+There is no inherent performance benefit from DuckDB views vs. MariaDB views — the benefit is
+access to DuckDB's extended syntax.
 
 ### Views as Language Extensions
 
-DuckDB expressions which are not functions can't use either of the macro approaches above. In these cases you can create a view inside DuckDB itself using the full DuckDB SQL dialect — HolyDuck will make it queryable through MariaDB automatically.
+DuckDB expressions that are not functions can't use the macro approach above. In these cases
+you can create a view inside DuckDB using the full DuckDB SQL dialect — HolyDuck makes it
+queryable through MariaDB automatically.
 
 **Step 1** — define the view in `holyduck_duckdb_extensions.sql`:
 ```sql
@@ -242,21 +217,23 @@ CREATE OR REPLACE VIEW mydb.v_my_view AS
 ```sql
 SET GLOBAL duckdb_reload_extensions = 1;
 ```
-That's it — `v_my_view` is now usable from MariaDB. HolyDuck discovers the view automatically the first time it's queried.
+That's it — `v_my_view` is now usable from MariaDB. HolyDuck discovers the view automatically
+the first time it's queried.
 
-To remove a view, delete it from `holyduck_duckdb_extensions.sql`, add a `DROP VIEW IF EXISTS` line, then reload:
-```sql
-DROP VIEW IF EXISTS mydb.v_my_view;
-```
+To remove a view, add a `DROP VIEW IF EXISTS` line to `holyduck_duckdb_extensions.sql` and
+delete the `CREATE OR REPLACE VIEW` for it, then reload:
 ```sql
 SET GLOBAL duckdb_reload_extensions = 1;
 ```
-Once confirmed gone, remove the DROP line and reload once more.
 
 ### Views for BI Tools
 
-BI tools (Tableau, Grafana, Power BI, etc.) generate their own SQL. Even when they do write CTEs, they may not structure them in a way that triggers efficient pushdown. The solution is to pre-bake the CTE pattern into a MariaDB view, so the tool always gets the right behavior regardless of what SQL it
-generates on top:
+BI tools (Tableau, Grafana, Power BI, etc.) generate their own SQL and have no awareness of
+the underlying engines. A MariaDB view over a DuckDB table works transparently — the tool
+queries it like any other table and HolyDuck handles pushdown automatically.
+
+Views are also useful for exposing a pre-shaped interface. For example, if a tool always needs
+aggregated sales by category and region, a view locks in that shape:
 
 ```sql
 CREATE VIEW sales_summary AS
@@ -267,6 +244,4 @@ CREATE VIEW sales_summary AS
     GROUP BY category_id, region_id;
 ```
 
-The BI tool queries `sales_summary` like a plain table. MariaDB rewrites the query against the
-view definition, `PUSHED DERIVED` fires, and the aggregation runs entirely inside DuckDB.
-The tool gets fast results without any knowledge of the underlying engine.
+The tool queries `sales_summary` like a plain table; the aggregation runs inside DuckDB.

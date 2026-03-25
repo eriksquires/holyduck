@@ -50,18 +50,22 @@ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} \
 
 add_library(ha_duckdb MODULE ha_duckdb.cc)
 
+# MariaDB expects "ha_duckdb.so", not "libha_duckdb.so"
+set_target_properties(ha_duckdb PROPERTIES PREFIX "")
+
 target_link_libraries(ha_duckdb ${DUCKDB_DIR}/libduckdb.so)
 
-# Show where the .so ends up
-message(STATUS "Plugin will be built at: ${CMAKE_CURRENT_BINARY_DIR}/ha_duckdb.so")
+# Copy the companion SQL macro file to the same directory as the .so.
+# Uses a generator expression so it follows CMAKE_LIBRARY_OUTPUT_DIRECTORY
+# when set (e.g. directly to the MariaDB plugin dir for no-copy deploys).
+add_custom_command(TARGET ha_duckdb POST_BUILD
+  COMMAND ${CMAKE_COMMAND} -E copy
+    ${CMAKE_CURRENT_SOURCE_DIR}/../sql/holyduck_duckdb_extensions.sql
+    $<TARGET_FILE_DIR:ha_duckdb>/holyduck_duckdb_extensions.sql
+  COMMENT "Copying holyduck_duckdb_extensions.sql alongside ha_duckdb.so"
+)
+
+message(STATUS "Plugin output:  $<TARGET_FILE:ha_duckdb>")
 message(STATUS "MariaDB source: ${MARIADB_SOURCE_DIR}")
 message(STATUS "MariaDB build:  ${MARIADB_BUILD_DIR}")
 message(STATUS "DuckDB dir:     ${DUCKDB_DIR}")
-
-# Copy the companion SQL macro file next to the built .so so it can be
-# deployed alongside it and found at runtime via opt_plugin_dir.
-configure_file(
-  ${CMAKE_CURRENT_SOURCE_DIR}/../sql/holyduck_duckdb_extensions.sql
-  ${CMAKE_CURRENT_BINARY_DIR}/holyduck_duckdb_extensions.sql
-  COPYONLY
-)

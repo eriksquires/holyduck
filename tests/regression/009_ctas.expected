@@ -1,0 +1,6 @@
+COUNT(*)	SUM(l_quantity)
+1207	1207.000
+COUNT(*)	COUNT(DISTINCT n_regionkey)
+25	5
+COUNT(*)	COUNT(DISTINCT n_regionkey)
+25	5

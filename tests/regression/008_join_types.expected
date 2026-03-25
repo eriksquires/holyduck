@@ -1,7 +1,7 @@
 name	sales_count	total
-Clothing	2	450
-Electronics	3	475
-Food	1	250
+Clothing	2	450.000
+Electronics	3	475.000
+Food	1	250.000
 order_id	amount	category
 1	100.000	Electronics
 2	200.000	Electronics
@@ -27,6 +27,6 @@ T-Shirt	East
 T-Shirt	North
 T-Shirt	South
 region	total
-East	475
-North	250
-South	450
+East	475.000
+North	250.000
+South	450.000

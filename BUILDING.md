@@ -54,8 +54,8 @@ MariaDB build entirely.
 ./scripts/deploy.sh duckdb-plugin-dev-ubuntu
 ```
 
-Builds `ha_duckdb.so`, copies it into the container, restarts MariaDB, installs the plugin,
-and verifies it loaded. Run this after every code change.
+Builds `ha_duckdb.so` directly into the container's plugin directory (via bind mount),
+restarts MariaDB, installs the plugin, and verifies it loaded. Run this after every code change.
 
 ### 6. Connect and test
 
@@ -68,6 +68,19 @@ CREATE TABLE t (id INT, val DOUBLE) ENGINE=DUCKDB;
 INSERT INTO t VALUES (1, 10.5), (2, 20.0), (3, 15.5);
 SELECT AVG(val) FROM t;
 ```
+
+## Building Release Artifacts
+
+To build Release binaries for all supported distros (ubuntu, oracle8, oracle9):
+
+```bash
+export MARIADB_SRC_DIR=<path to MariaDB source>
+perl scripts/build-all.pl dist/0.3.0
+```
+
+This stops and starts containers as needed (only one can bind port 3306 at a time), configures
+cmake with `CMAKE_BUILD_TYPE=Release` for each distro, and copies the binaries and SQL files
+into the output directory.
 
 ## Development Workflow
 
