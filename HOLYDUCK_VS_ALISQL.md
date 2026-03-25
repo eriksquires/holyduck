@@ -55,7 +55,7 @@ have in InnoDB, HolyDuck gives you a high-performance columnar store for data yo
 *choose* to land there — ETL outputs, aggregated results, large fact tables — while
 letting you join freely against InnoDB dimension tables without leaving MariaDB.
 
-In short: AliSQL asks *"how do we put your InnoDB data into DuckDB?"*
+In short: AliSQL asks *"how do we stream InnoDB into DuckDB?"*
 HolyDuck asks *"how do we make DuckDB a first-class citizen inside MariaDB?"*
 These are different questions with different answers.
 
