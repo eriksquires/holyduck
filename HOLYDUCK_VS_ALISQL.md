@@ -1,6 +1,6 @@
 # HolyDuck Plugin vs AliSQL
 
-This document compares HolyDuck with [Alibaba's AliSQL (a MySQL fork)](https://github.com/alibaba/AliSQL). It was written in response to a suggestion that HolyDuck is a clone of the AliSQL implementation.
+This document compares HolyDuck with [Alibaba's AliSQL (a MySQL fork)](https://github.com/alibaba/AliSQL). It was written in response to a public comment that HolyDuck is a clone of the AliSQL implementation or at least had taken some code from the AliSQL project without attribution. 
 
 **HolyDuck is an independent implementation and has no code derived from AliSQL.** They are two independent implementations in a similar problem space with fundamentally different architectures and different design goals.  
 
