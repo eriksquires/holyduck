@@ -172,6 +172,13 @@ typing `int main()`. It is not copying — it is the interface.
 
 ---
 
+## Maintainability
+
+Ultimately, HolyDuck is a small code base relying on published APIs. When changes occur to either MariaDB or DuckDB updates should be easy. AliSQL, having 
+embedded both MySQL 8 and a custom DuckDB code base can't easily upgrade either. 
+
+---
+
 ## Verdict
 
 AliSQL and HolyDuck solve fundamentally different problems: AliSQL builds a dedicated analytical replica where all user data
