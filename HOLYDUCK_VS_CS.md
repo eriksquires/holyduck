@@ -15,4 +15,4 @@ MariaDB's ColumnStore is the official enterprise-grade MariaDB analytical storag
 
 **ColumnStore's sweet spot:** when you've outgrown a single node and need HA, replication, and multi-server distribution.
 
-It should go without saying but HolyDuck has not used any resources from ColumnStore. 
+It should go without saying but HolyDuck has not used any resources from ColumnStore.

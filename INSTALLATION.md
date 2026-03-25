@@ -42,5 +42,3 @@ SELECT ENGINE, SUPPORT, COMMENT FROM information_schema.ENGINES WHERE ENGINE='DU
 ```
 
 You should see `SUPPORT: YES`. You're ready to create DuckDB tables.
-
-## 
