@@ -189,5 +189,9 @@ HolyDuck lives alongside InnoDB on the same instance, uses MariaDB's `select_han
 and `derived_handler` APIs for pushdown, and solves the hard problem of mixed-engine
 joins by injecting InnoDB tables into DuckDB at query time.
 
+## Epilogue
+
+We acknowledge our summary here is written for a specific purpose and we may make unintentional errors in describing AliSQL behavior and intention.  We certainly don't mean to in any way denegrate that work and when factual errors exist we look forward to correcting them. 
+
 Ultimately tackling mixed-engine joins should prove to anyone that **HolyDuck** is not
 a clone but an immaculate conception. 
