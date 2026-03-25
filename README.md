@@ -15,48 +15,14 @@ HolyDuck is an extremely easy to install, easy to use OLAP engine that lives ins
 
 We are particularly proud of the performance of mixed-engine joins.  The pain point for any mixed-engine database is joins on tables that come from multiple engines/storage systems.  With a little care in your SQL query and the favor of HolyDuck you can avoid the penalty of bringing large datasets out to MariaDB for row by row joining.
 
-## Quick Example
+The ideal user of HolyDuck is a small team with a handful of very large tables that get a lot of reads during the day and are updated nightly.  
 
-```sql
--- Analytical table in DuckDB
-CREATE TABLE metrics (ts DATETIME, sensor_id INT, val DOUBLE) ENGINE=DUCKDB;
+## Comparisons
 
--- Lookup table in InnoDB
-CREATE TABLE sensors (id INT PRIMARY KEY, name VARCHAR(64)) ENGINE=InnoDB;
+We've written comparisons to:
 
--- Mixed-engine query — DuckDB aggregation pushed down, joined against InnoDB
-WITH agg AS (
-    SELECT sensor_id, AVG(val) AS avg_val
-    FROM metrics
-    GROUP BY sensor_id
-)
-SELECT s.name, a.avg_val
-FROM sensors s
-JOIN agg a ON s.id = a.sensor_id;
-```
-
-See [WRITING_SQL.md](WRITING_SQL.md) for query optimization patterns and pushdown details. For architecture and internals see [INTERNALS.md](INTERNALS.md).
-
-## HolyDuck vs ColumnStore
-
-MariaDB's ColumnStore is the official enterprise-grade MariaDB analytical storage engine in this space. Here's how our humble contribution compares:
-
-|                           | HolyDuck                          | ColumnStore                          |
-| ------------------------- | --------------------------------- | ------------------------------------ |
-| Architecture              | In-process — runs inside mysqld   | Separate process / service           |
-| Concurrent writers        | Single writer (DuckDB limitation) | Parallel ingestion                   |
-| High availability         | None — local file only            | MariaDB replication + clustering     |
-| Multi-server              | Single node                       | Distributed across nodes             |
-| Deployment                | Drop in a `.so` file              | Full cluster infrastructure          |
-| Setup complexity          | Minutes                           | Hours to days                        |
-
-**HolyDuck's sweet spot:** single-node analytics alongside InnoDB. Big overnight ETL jobs, exploratory data analysis during the day, million-to-billion row scans that return small aggregated results — all without standing up any infrastructure.
-
-If you can live with single writers for your big tables HolyDuck offers you a sharable database with a single source of truth. Also, if you are like me and leave db connections stranded in various places while doing R/Quarto development you'll find yourself spending much less time managing connections in your code.
-
-HolyDuck tables are native DuckDB tables that live and grow in a DuckDB database — no external connections or translations occur.
-
-**ColumnStore's sweet spot:** when you've outgrown a single node and need HA, replication, and multi-server distribution.
+- [ColumnStore](HOLYDUCK_VS_CS.md)
+- [AliSQL](HOLYDUCK_VS_ALISQL.md) 
 
 ## DuckDB Limitations
 
@@ -68,48 +34,7 @@ Another important limitation is that MariaDB enforces it's SQL language idioms. 
 
 ## Installation
 
-Pre-built binaries are available on the [Releases](https://github.com/eriksquires/HolyDuck/releases) page for Ubuntu 22.04 (and Debian 12), Oracle Linux 8 and 9.
-
-### 1. Find your plugin directory
-
-```sql
-SELECT @@plugin_dir;
-```
-
-### 2. Install libduckdb.so
-
-HolyDuck v0.2.0 requires DuckDB v1.5.0. Download `libduckdb-linux-amd64.zip` from the
-[DuckDB releases page](https://github.com/duckdb/duckdb/releases/tag/v1.5.0), then:
-
-```bash
-unzip libduckdb-linux-amd64.zip libduckdb.so
-cp libduckdb.so /usr/lib/libduckdb.so
-ldconfig
-```
-
-### 3. Copy the plugin files
-
-Download `ha_duckdb-<distro>.so` and `holyduck_duckdb_extensions.sql` from the [HolyDuck releases page](https://github.com/eriksquires/HolyDuck/releases),
-then copy both into your plugin directory:
-
-```bash
-cp ha_duckdb-ubuntu22.so /path/to/plugin_dir/ha_duckdb.so
-cp holyduck_duckdb_extensions.sql /path/to/plugin_dir/holyduck_duckdb_extensions.sql
-```
-
-### 4. Install the plugin
-
-```sql
-INSTALL PLUGIN duckdb SONAME 'ha_duckdb-<distro>.so';
-```
-
-### 5. Verify
-
-```sql
-SELECT ENGINE, SUPPORT, COMMENT FROM information_schema.ENGINES WHERE ENGINE='DUCKDB';
-```
-
-You should see `SUPPORT: YES`. You're ready to create DuckDB tables.
+See [INSTALLATION.md](INSTALLATION.md) for a quick guide.
 
 ## Building from Source
 
