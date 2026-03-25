@@ -1,74 +1,95 @@
 # TPC-H Compatibility Notes
 
-This document tracks SQL compatibility issues encountered when running TPC-H 3.0.1
-queries through HolyDuck, and how they are resolved.
+This document tracks issues encountered when running TPC-H 3.0.1 queries through
+HolyDuck, separated by root cause.
 
 ---
 
-## Rewrites added to `rewrite_mariadb_sql`
+## Part 1: HolyDuck fixes (MariaDB printer → DuckDB translation gaps)
 
-### `INTERVAL 'N' unit` → `INTERVAL 'N units'`
+These are bugs or gaps in HolyDuck's SQL rewrite layer.  The TPC-H SQL is valid
+standard SQL; the problem is that MariaDB's internal query printer emits syntax
+that DuckDB rejects.  The fix belongs in `rewrite_mariadb_sql()`.
 
-**Affected queries:** Q1, Q4, Q5, Q6, Q10 (any query using interval arithmetic)
+### `INTERVAL 'N' unit` — FIXED
+
+**Affected queries:** Q1, Q4, Q5, Q6, Q10
 
 MariaDB's query printer emits `INTERVAL 'N' UNIT` (quoted integer, separate unit
-keyword).  DuckDB requires the number and unit in a single string: `INTERVAL '90 days'`.
-The bare-integer form `INTERVAL N UNIT` is also rejected by DuckDB.
+keyword).  DuckDB requires number and unit in a single string: `INTERVAL '90 days'`.
 
-HolyDuck rewrites `interval 'N' unit[s]` → `interval 'N units'` in the SQL rewrite
-pass before pushdown.
+**Fix:** Rewrite `interval 'N' unit[s]` → `interval 'N units'` before pushdown.
 
 ---
 
-### `DATE'YYYY-MM-DD'` → `DATE 'YYYY-MM-DD'`
+### `DATE'YYYY-MM-DD'` (no space) — FIXED
 
-**Affected queries:** Q1, Q3, Q4, Q5, Q6, Q7, Q8, Q10 (ANSI date literals)
+**Affected queries:** Q1, Q3, Q4, Q5, Q6, Q7, Q8, Q10
 
 MariaDB's query printer emits ANSI date literals without a space between the `DATE`
-keyword and the string (e.g. `DATE'1998-12-01'`).  DuckDB requires a space:
-`DATE '1998-12-01'`.  Without the space, DuckDB misparsed the expression and
-arithmetic on the result failed with a type error.
+keyword and the string (e.g. `DATE'1998-12-01'`).  DuckDB requires the space.
+Without it, DuckDB misparsed the expression and subsequent arithmetic failed.
+
+**Fix:** Rewrite `DATE'...'` → `DATE '...'` before pushdown.
 
 ---
 
-### `<in_optimizer>(val, expr)` → `expr`
+### `<in_optimizer>(val, expr)` — FIXED
 
-**Affected queries:** Q4 and any query using `EXISTS` subqueries
+**Affected queries:** Q4 and any query using `EXISTS`
 
 MariaDB's optimizer wraps `IN`/`EXISTS` subqueries in an internal `Item_in_optimizer`
-node.  The printed form is `<in_optimizer>(val, expr)`.  DuckDB does not recognise
-this syntax.  HolyDuck strips the wrapper and emits just the inner expression.
+node printed as `<in_optimizer>(val, expr)`.  DuckDB rejects this syntax.
+
+**Fix:** Strip the wrapper, emit just the inner `expr`.
 
 ---
 
-## Query-level notes
+### `EXISTS (SELECT * ...)` causes SIGSEGV — OPEN BUG
 
-### Q4 — `EXISTS (SELECT * ...)` crashes MariaDB
+**Affected queries:** Q4 (and potentially others)
 
-**Status:** Known bug — avoid `SELECT *` inside `EXISTS`
+`EXISTS (SELECT * FROM <duckdb_table> WHERE ...)` crashes MariaDB with signal 11.
+`EXISTS (SELECT 1 ...)` works correctly.  Both are semantically identical per the SQL
+standard.  The crash is in HolyDuck's handling of the expanded column list inside an
+EXISTS subquery.
 
-`EXISTS (SELECT * FROM lineitem WHERE ...)` causes a SIGSEGV in MariaDB when the
-subquery table is a DuckDB engine table. Use `EXISTS (SELECT 1 FROM ...)` instead.
-The semantics are identical per SQL standard.  The TPC-H test for Q4 uses `SELECT 1`.
-
-**Root cause:** Under investigation.
-
-### Q8 — zero results at sf=0.01
-
-The canonical Q8 parameters (BRAZIL, AMERICA, ECONOMY ANODIZED STEEL) return
-`mkt_share = 0` at scale factor 0.01.  This is a data sparsity issue, not a bug —
-DuckDB produces the same result directly.  The test captures this as the expected
-output.
+**Workaround:** Use `SELECT 1` inside `EXISTS` in regression test SQL.
+**Status:** Root cause under investigation.
 
 ---
 
-## Raw TPC-H query files
+## Part 2: TPC-H SQL adaptations
 
-The raw query files in `TPC_H_3_0_1/dbgen/queries/` are `qgen` templates, not
-runnable SQL.  They contain:
+These are cases where the raw TPC-H query templates require modification before they
+can run against any database, or where the SQL constructs are valid standard SQL but
+not accepted by MariaDB's parser.
 
-- `:x`, `:o`, `:n N` — directives (skip limit, output format, row limit)
-- `':1'`, `':2'`, `':3'` — substitution variables replaced by `qgen` at runtime
+### `qgen` template syntax must be substituted
 
-The regression test SQL files in `tests/regression/tpch/` are cleaned versions
-with canonical parameter values substituted in.
+The raw files in `TPC_H_3_0_1/dbgen/queries/` are `qgen` templates, not runnable SQL:
+
+- `:x`, `:o`, `:n N` — output/format directives (strip entirely)
+- `':1'`, `':2'`, `':3'` — parameter substitution variables
+
+The regression test files in `tests/regression/tpch/` have canonical parameter
+values substituted in per the TPC-H specification.
+
+---
+
+### `LIMIT` not in original queries
+
+Several TPC-H queries specify a row limit via `:n N` in the template (e.g. Q2 limits
+to 100 rows, Q10 to 20 rows).  These become `LIMIT N` clauses in the regression SQL.
+
+---
+
+## Summary table
+
+| Issue | Root cause | Status |
+|---|---|---|
+| `INTERVAL 'N' unit` syntax | MariaDB printer | Fixed in rewrite pass |
+| `DATE'...'` missing space | MariaDB printer | Fixed in rewrite pass |
+| `<in_optimizer>` wrapper | MariaDB optimizer | Fixed in rewrite pass |
+| `EXISTS (SELECT *)` crash | HolyDuck bug | Open — workaround: use `SELECT 1` |
+| `qgen` template variables | TPC-H template format | Substituted in test SQL |
