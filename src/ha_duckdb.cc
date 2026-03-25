@@ -2265,6 +2265,89 @@ static std::string rewrite_mariadb_sql(const std::string &sql)
 
   s= strip_db_qualifier(s);
 
+  // Strip all MariaDB internal optimizer artifact tokens.
+  //
+  // MariaDB's query printer (Item::print / SELECT_LEX::print) emits <tag>
+  // tokens for internal optimizer nodes that DuckDB's parser rejects.
+  // We handle two categories:
+  //
+  //  A. Wrapper nodes — <tag>(inner): strip the tag, keep the inner expr.
+  //     Includes: <index_lookup>(, <ref_null_helper>(, <is_not_null_test>(,
+  //               <not>(
+  //     Note: <not>(expr) becomes NOT (expr); the others just drop the wrapper.
+  //
+  //  B. Bare tokens with no meaningful content for DuckDB:
+  //     <nop>, <list ref>, <no matter>, <result>, <rowid>, <no_table_name>,
+  //     <temporary table>, <<DISABLED>>
+  //     These are stripped entirely (replaced with empty string).
+  //
+  // The scanner also handles the `, <primary_index_lookup>(...)` and
+  // `<materialize>` cases below, which require special treatment.
+  {
+    // --- A. Wrapper strippers ---
+    struct WrapperTag {
+      const char *tag;
+      const char *replacement_open;  // nullptr → just strip tag, keep '('
+    };
+    static const WrapperTag wrappers[] = {
+      { "<index_lookup>(",    nullptr         },  // strip tag, keep '('
+      { "<ref_null_helper>(", nullptr         },
+      { "<is_not_null_test>(", nullptr        },
+      { "<not>(",             "NOT ("         },  // logical NOT
+    };
+
+    for (const auto &w : wrappers)
+    {
+      std::string tag(w.tag);
+      std::string out;
+      out.reserve(s.size());
+      size_t i= 0, n= s.size();
+      // case-insensitive compare helper
+      auto ci_cmp= [&](size_t pos, const std::string &t) {
+        if (pos + t.size() > n) return false;
+        for (size_t k= 0; k < t.size(); k++)
+          if (tolower((unsigned char)s[pos+k]) != tolower((unsigned char)t[k]))
+            return false;
+        return true;
+      };
+      while (i < n)
+      {
+        if (ci_cmp(i, tag))
+        {
+          if (w.replacement_open)
+            out += w.replacement_open;
+          else
+            out += '(';
+          i += tag.size();  // tag already includes the '('
+        }
+        else
+          out += s[i++];
+      }
+      s= out;
+    }
+
+    // --- B. Bare token strippers ---
+    static const char *bare[] = {
+      "<nop>", "<list ref>", "<no matter>", "<result>", "<rowid>",
+      "<no_table_name>", "<temporary table>", "<<DISABLED>>",
+    };
+    for (const char *tok : bare)
+    {
+      std::string t(tok);
+      std::string out;
+      out.reserve(s.size());
+      size_t i= 0, n= s.size();
+      while (i < n)
+      {
+        if (s.compare(i, t.size(), t) == 0)
+          i += t.size();
+        else
+          out += s[i++];
+      }
+      s= out;
+    }
+  }
+
   // Strip MariaDB's <expr_cache><key>(expr) wrapper.
   // MariaDB's optimizer emits <expr_cache><col_ref>(expr) for cached subquery
   // lookups (e.g. NOT IN rewritten via materialisation).  DuckDB rejects the
