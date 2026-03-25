@@ -11,11 +11,7 @@ MariaDB's ColumnStore is the official enterprise-grade MariaDB analytical storag
 | Deployment         | Drop in a `.so` file              | Full cluster infrastructure      |
 | Setup complexity   | Minutes                           | Hours to days                    |
 
-**HolyDuck's sweet spot:** single-node analytics alongside InnoDB. Big overnight ETL jobs, exploratory data analysis during the day, million-to-billion row scans that return small aggregated results — all without standing up any infrastructure.
-
-If you can live with single writers for your big tables HolyDuck offers you a sharable database with a single source of truth. Also, if you are like me and leave db connections stranded in various places while doing R/Quarto development you'll find yourself spending much less time managing connections in your code.
-
-HolyDuck tables are native DuckDB tables that live and grow in a DuckDB database — no external connections or translations occur.
+**HolyDuck's sweet spot:** single-node analytics alongside InnoDB. Big overnight ETL jobs, exploratory data analysis during the day, million-to-billion row scans that return small aggregated results — all without standing up any infrastructure. HolyDuck tables are native DuckDB tables that live and grow in a DuckDB database — no external connections or translations occur.
 
 **ColumnStore's sweet spot:** when you've outgrown a single node and need HA, replication, and multi-server distribution.
 
