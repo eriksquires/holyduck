@@ -71,39 +71,37 @@ lookups during materialization.  DuckDB rejects the `<...>` syntax.
 
 ---
 
-### `EXISTS (SELECT * ...)` causes SIGSEGV — OPEN BUG
+### `EXISTS (SELECT * ...)` — FIXED
 
-**Affected queries:** Q4 and any query using `EXISTS (SELECT * ...)`
+**Affected queries:** Q4, Q21, and any query using `EXISTS (SELECT * ...)`
 
-`EXISTS (SELECT * FROM <duckdb_table> WHERE ...)` crashes MariaDB with signal 11.
-`EXISTS (SELECT 1 ...)` works correctly.  Both are semantically identical per the SQL
-standard.  The crash is in HolyDuck's handling of the expanded column list inside an
-EXISTS subquery.
+Previously caused a SIGSEGV when MariaDB's AST printer expanded `SELECT *` inside
+an EXISTS subquery into an internal column list that HolyDuck could not handle.
 
-**Workaround:** Use `SELECT 1` inside `EXISTS` in regression test SQL.
-**Status:** Root cause under investigation.
+**Fix:** The original-SQL path passes `EXISTS (SELECT * ...)` directly to DuckDB,
+which handles it natively.  No rewrite or workaround needed.
 
 ---
 
-### Derived table in FROM crashes MariaDB — OPEN BUG
+### Derived table in FROM — OPEN BUG
 
-**Affected queries:** Q15, Q22 (original form)
+**Affected queries:** Q22 (original form)
 
-`SELECT ... FROM (SELECT ... FROM <duckdb_table> ...) AS alias` crashes MariaDB
-with signal 11 when the derived table references DuckDB tables and contains certain
-subquery patterns (`NOT EXISTS`, correlated subqueries).
+`SELECT ... FROM (SELECT ... FROM <duckdb_table> ...) AS alias` fails when the
+derived table contains `NOT EXISTS` or correlated subqueries.  The `derived_handler`
+still uses MariaDB's AST printer, which emits `<materialize>` and `!(...  in  ...)`
+artifacts for these patterns.  DuckDB rejects both.
 
-The outer derived table triggers MariaDB's subquery materialization path which emits
-internal nodes (`<materialize>`, `<primary_index_lookup>`, `<temporary table>`,
-`"<subquery3>"`) that cannot be translated to DuckDB SQL.
-
-**Workaround for Q15:** Use CTE form — but CTE references are also stripped before
-pushdown (tracked as separate issue; see Q15 notes below).  Q15 is blocked.
+The `select_handler` original-SQL path does not help here: for a derived table,
+`thd->query()` is the full outer query, not the subquery — we can't push just the
+derived table body from the original SQL string.
 
 **Workaround for Q22:** Rewrite to eliminate the outer derived table — push the
 aggregation directly into the outer SELECT.
 
-**Status:** Root cause under investigation.
+**Status:** Root cause under investigation.  Fix requires either teaching the
+derived_handler to detect pure-DuckDB subqueries and skip materialization, or
+stripping `<materialize>` artifacts in `rewrite_mariadb_sql`.
 
 ---
 
@@ -173,8 +171,8 @@ The canonical Q8 parameters (BRAZIL, AMERICA, ECONOMY ANODIZED STEEL) return
 | `<in_optimizer>` wrapper | MariaDB optimizer | Fixed |
 | `!(<exists>)` / `!exists()` wrappers | MariaDB optimizer | Fixed |
 | `<expr_cache><key>()` wrapper | MariaDB optimizer | Fixed |
-| `EXISTS (SELECT *)` crash | HolyDuck bug | Open — use `SELECT 1` |
-| Derived table in FROM crash | HolyDuck bug | Open — Q15 blocked, Q22 rewritten |
+| `EXISTS (SELECT *)` crash | HolyDuck bug | Fixed |
+| Derived table in FROM (derived_handler) | HolyDuck bug | Open — Q22 rewritten |
 | CTE references stripped | HolyDuck bug | Fixed |
 | Q15 `CREATE VIEW` form | TPC-H template | Use CTE form (now works) |
 | Q22 outer derived table | TPC-H structure | Rewritten to avoid |
