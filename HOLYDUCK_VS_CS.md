@@ -19,4 +19,4 @@ HolyDuck tables are native DuckDB tables that live and grow in a DuckDB database
 
 **ColumnStore's sweet spot:** when you've outgrown a single node and need HA, replication, and multi-server distribution.
 
-## 
+It should go without saying but HolyDuck has not used any ColumnStore code. 
