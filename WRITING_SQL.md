@@ -254,19 +254,25 @@ SET GLOBAL duckdb_reload_extensions = 1;
 ### Views for BI Tools
 
 BI tools (Tableau, Grafana, Power BI, etc.) generate their own SQL and have no awareness of
-the underlying engines. A MariaDB view over a DuckDB table works transparently — the tool
-queries it like any other table and HolyDuck handles pushdown automatically.
+the underlying engines. They don't need to — HolyDuck handles pushdown automatically for
+direct queries against DuckDB tables, including WHERE clauses, GROUP BY, ORDER BY, and UNION.
 
-Views are also useful for exposing a pre-shaped interface. For example, if a tool always needs
-aggregated sales by category and region, a view locks in that shape:
+Views are useful for two things: exposing a stable interface regardless of the underlying
+schema, and giving BI tools access to cross-engine joins without any tool-side configuration.
+A view joining DuckDB fact tables with InnoDB dimension tables works transparently:
 
 ```sql
-CREATE VIEW sales_summary AS
-    SELECT category_id, region_id,
-           SUM(amount) AS total_sales,
+CREATE VIEW sales_by_category AS
+    SELECT c.name AS category,
+           r.name AS region,
+           SUM(s.amount) AS total_sales,
            COUNT(*) AS order_count
-    FROM sales
-    GROUP BY category_id, region_id;
+    FROM sales s
+    JOIN categories c ON s.category_id = c.id
+    JOIN regions r ON s.region_id = r.id
+    GROUP BY c.name, r.name;
 ```
 
-The tool queries `sales_summary` like a plain table; the aggregation runs inside DuckDB.
+The tool queries `sales_by_category` like any plain table. HolyDuck injects `categories` and
+`regions` into DuckDB and pushes the entire query down — the tool never knows or cares that
+the underlying tables span two engines.
