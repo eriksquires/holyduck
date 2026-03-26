@@ -15,6 +15,22 @@ could achieve our major goals with macros and a little manual SQL rewriting. Her
 - Extending HolyDuck with custom features
 - Leveraging views
 
+## Transaction Limitations
+
+DuckDB tables do not participate in MariaDB transactions. The practical consequences:
+
+- `ROLLBACK` does not undo writes to DuckDB tables. If you write to a DuckDB table inside a
+  `BEGIN` / `ROLLBACK` block, the write sticks.
+- There is no two-phase commit between DuckDB and InnoDB. A transaction that writes to both
+  engines is not atomic — if it fails mid-way, the InnoDB side can be rolled back but the
+  DuckDB side cannot.
+- `SAVEPOINT` and `XA` are not supported for DuckDB tables.
+
+For data that requires transactional guarantees, use InnoDB. DuckDB tables are best suited for
+append-heavy analytical data where writes are bulk loads rather than transactional operations.
+
+---
+
 ## SQL Dialect
 
 **All SQL passes through MariaDB's parser first**. If MariaDB doesn't recognize the syntax or
