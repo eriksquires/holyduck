@@ -16,7 +16,7 @@ MariaDB is beloved. DuckDB is a miracle of analytical performance and small team
 - Run analytical queries (GROUP BY, aggregations, window functions) inside DuckDB at DuckDB speed
 - Mix DuckDB and InnoDB tables in the same query without moving tables unnecessarily
 
-HolyDuck is an extremely easy to install, easy to use OLAP engine that lives inside your existing MariaDB data infrastructure.  The speed of a parallel column store database with the convenience of MariaDB with incredibly simple installation. An ideal solution for small teams living in a MariaDB ecosystem.
+HolyDuck is an extremely easy to install, easy to use duckdb plugin adapter that lives inside your existing MariaDB data infrastructure.  The speed of a parallel column store database with the convenience of MariaDB with incredibly simple installation. An ideal solution for small teams living in a MariaDB ecosystem.
 
 We are particularly proud of the performance of mixed-engine joins.  The pain point for any mixed-engine database is joins on tables that come from multiple engines/storage systems.  With a little care in your SQL query and the favor of HolyDuck you can avoid the penalty of bringing large datasets out to MariaDB for row by row joining.
 
