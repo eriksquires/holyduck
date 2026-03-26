@@ -438,6 +438,36 @@ static MYSQL_SYSVAR_STR(
   NULL, duckdb_execute_script_update,
   NULL);
 
+static my_bool duckdb_flush_cache_var= 0;
+
+static void duckdb_flush_cache_update(THD *thd,
+                                       struct st_mysql_sys_var *var,
+                                       void *var_ptr, const void *save)
+{
+  if (!*(my_bool *)save) return;
+
+  // Clear this session's injection cache. The next query that references any
+  // previously-cached InnoDB table will DROP the stale TEMP TABLE in DuckDB
+  // and re-inject fresh data. Useful after count-preserving UPDATEs that the
+  // automatic row-count check cannot detect.
+  mysql_mutex_lock(&g_duckdb_mutex);
+  auto it= g_thd_conns.find(thd);
+  if (it != g_thd_conns.end())
+    g_injected_cache.erase(it->second.conn);
+  mysql_mutex_unlock(&g_duckdb_mutex);
+}
+
+static MYSQL_SYSVAR_BOOL(
+  flush_cache,
+  duckdb_flush_cache_var,
+  PLUGIN_VAR_RQCMDARG,
+  "Flush the InnoDB→DuckDB injection cache for this session. "
+  "Set to 1 to force re-injection of all cached dimension tables on "
+  "the next query. Use after count-preserving UPDATEs on InnoDB tables "
+  "that the automatic row-count invalidation cannot detect.",
+  NULL, duckdb_flush_cache_update,
+  0);
+
 static char *duckdb_execute_sql_var= NULL;
 
 static void duckdb_execute_sql_update(THD *thd,
@@ -496,6 +526,7 @@ static struct st_mysql_sys_var *duckdb_system_variables[]=
   MYSQL_SYSVAR(execute_script),
   MYSQL_SYSVAR(execute_sql),
   MYSQL_SYSVAR(last_result),
+  MYSQL_SYSVAR(flush_cache),
   NULL
 };
 
