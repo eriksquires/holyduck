@@ -5,9 +5,9 @@
 **HolyDuck** is a MariaDB storage engine plugin that embeds [DuckDB](https://duckdb.org/) as a first-class DB storage engine next to InnoDB. Create tables with `ENGINE=DUCKDB` and query them with standard SQL — DuckDB handles the heavy lifting.
 
 ## What's Unique
-HolyDuck fully supports hybrid table joins by inverting control from the MariaDB planner to DuckDb and pushing down InnoDB predicates back into Maria. 
+HolyDuck enables true hybrid joins by shifting execution into DuckDB while dynamically sourcing data from both DuckDB and InnoDB tables. Predicates are applied at the appropriate layer to minimize data movement and avoid full table scans.
 
-At this point we can run the full TPC-H test suite either with some tables in InnoDB or entirely in DuckDB with really remarkably good performance. 
+The full TPC-H test suite runs successfully with tables split across InnoDB and DuckDB, or entirely in DuckDB, with consistently strong performance.
 
 ## Why
 
