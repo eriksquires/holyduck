@@ -26,29 +26,20 @@ step "Stopping MariaDB..."
 docker exec "${CONTAINER}" service mariadb stop
 ok "MariaDB stopped"
 
-# ── 2. Build tpch_sm and tpch_mm entirely inside DuckDB ───────────────────────
-#    Running the DuckDB CLI directly against global.duckdb avoids routing any
-#    rows through the plugin layer — fast at any scale factor.
+# ── 2. Generate tpch_sm in global.duckdb via DuckDB CLI ───────────────────────
+#    Only tpch_sm is generated here.  tpch_mm fact tables are populated later
+#    via duckdb_execute_sql INSERT (after MariaDB creates the empty shells),
+#    which keeps the data inside DuckDB without routing rows through the plugin.
 step "Generating TPC-H SF=${SF} data in DuckDB (this may take a few minutes)..."
 docker exec "${CONTAINER}" duckdb "${DUCKDB_FILE}" <<SQL
 SET home_directory='/var/lib/mysql';
 INSTALL tpch;
 LOAD tpch;
-
--- tpch_sm: all eight TPC-H tables, used as the all-DuckDB SM baseline
 DROP SCHEMA IF EXISTS tpch_sm CASCADE;
 CREATE SCHEMA tpch_sm;
 CALL dbgen(sf=${SF}, schema='tpch_sm');
-
--- tpch_mm: fact tables only (dimension tables will be InnoDB, created below)
-DROP SCHEMA IF EXISTS tpch_mm CASCADE;
-CREATE SCHEMA tpch_mm;
-CREATE TABLE tpch_mm.lineitem  AS SELECT * FROM tpch_sm.lineitem;
-CREATE TABLE tpch_mm.orders    AS SELECT * FROM tpch_sm.orders;
-CREATE TABLE tpch_mm.partsupp  AS SELECT * FROM tpch_sm.partsupp;
-CREATE TABLE tpch_mm.customer  AS SELECT * FROM tpch_sm.customer;
 SQL
-ok "DuckDB data ready (tpch_sm + tpch_mm fact tables)"
+ok "tpch_sm data ready"
 
 # ── 3. Build the standalone benchmark DuckDB file ─────────────────────────────
 step "Generating standalone benchmark file at ${PERF_FILE}..."
@@ -65,18 +56,17 @@ ok "Standalone DuckDB file ready"
 # ── 4. Restart MariaDB ────────────────────────────────────────────────────────
 step "Starting MariaDB..."
 docker exec "${CONTAINER}" service mariadb start
-# Wait for it to be ready
 docker exec "${CONTAINER}" bash -c "while ! mysqladmin ping --silent 2>/dev/null; do sleep 1; done"
 ok "MariaDB ready"
 
-# ── 5. Register databases in MariaDB catalog ──────────────────────────────────
-step "Registering tpch_sm and tpch_mm in MariaDB..."
+# ── 5. Register tpch_sm and create tpch_mm skeleton in MariaDB ───────────────
+step "Creating MariaDB databases and tpch_mm InnoDB dimension tables..."
 ${MARIADB} <<SQL
 -- tpch_sm: register as a MariaDB database (DuckDB tables already exist)
 CREATE DATABASE IF NOT EXISTS tpch_sm;
 
--- tpch_mm: register fact tables (LIKE inherits ENGINE=DUCKDB from tpch_sm;
---   plugin issues CREATE TABLE IF NOT EXISTS so pre-populated data is kept)
+-- tpch_mm: MariaDB creates empty DuckDB-engine shells via LIKE, then we
+--   populate them from tpch_sm entirely inside DuckDB (step 6 below).
 DROP DATABASE IF EXISTS tpch_mm;
 CREATE DATABASE tpch_mm;
 
@@ -85,7 +75,7 @@ CREATE TABLE tpch_mm.orders    LIKE tpch_sm.orders;
 CREATE TABLE tpch_mm.partsupp  LIKE tpch_sm.partsupp;
 CREATE TABLE tpch_mm.customer  LIKE tpch_sm.customer;
 
--- InnoDB dimension tables (small: nation=25, region=5, part=2M, supplier=100K at SF10)
+-- InnoDB dimension tables (nation=25, region=5, part=2M, supplier=100K at SF10)
 CREATE TABLE tpch_mm.nation   ENGINE=InnoDB AS SELECT * FROM tpch_sm.nation;
 CREATE TABLE tpch_mm.region   ENGINE=InnoDB AS SELECT * FROM tpch_sm.region;
 CREATE TABLE tpch_mm.part     ENGINE=InnoDB AS SELECT * FROM tpch_sm.part;
@@ -96,19 +86,23 @@ ALTER TABLE tpch_mm.region   ADD PRIMARY KEY (r_regionkey);
 ALTER TABLE tpch_mm.part     ADD PRIMARY KEY (p_partkey);
 ALTER TABLE tpch_mm.supplier ADD PRIMARY KEY (s_suppkey);
 SQL
-ok "MariaDB catalog registered"
+ok "MariaDB skeleton ready"
 
-# ── 6. Verify ─────────────────────────────────────────────────────────────────
+# ── 6. Populate tpch_mm fact tables inside DuckDB ────────────────────────────
+#    INSERT via duckdb_execute_sql stays entirely within DuckDB — no rows
+#    are routed through the plugin layer regardless of scale factor.
+step "Populating tpch_mm fact tables inside DuckDB..."
+for tbl in lineitem orders partsupp customer; do
+  ${MARIADB} -e "SET GLOBAL duckdb_execute_sql = 'INSERT INTO tpch_mm.${tbl} SELECT * FROM tpch_sm.${tbl}';"
+  ok "  ${tbl}"
+done
+
+# ── 7. Verify ─────────────────────────────────────────────────────────────────
 step "Verifying row counts..."
-${MARIADB} <<'SQL'
-SELECT
-    table_name,
-    table_rows AS approx_rows,
-    engine
-FROM information_schema.tables
-WHERE table_schema = 'tpch_mm'
-ORDER BY table_rows DESC;
-SQL
+for tbl in lineitem orders partsupp customer part supplier nation region; do
+  count=$(${MARIADB} -sN -e "SELECT COUNT(*) FROM tpch_mm.${tbl};")
+  printf "  %-12s %s\n" "${tbl}" "${count}"
+done
 
 echo ""
 echo -e "${GREEN}Setup complete: tpch_sm and tpch_mm ready at SF=${SF}.${NC}"
