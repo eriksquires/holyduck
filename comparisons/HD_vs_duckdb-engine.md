@@ -2,20 +2,20 @@
 
 March 26, 2026
 
-There has been confusion about [HolyDuck](https://github.com/eriksquires/holyduck)’s provenance relative to [duckdb-engine](https://github.com/drrtuy/duckdb-engine/tree/master), also hosted on GitHub and authored by drrtuy. This may be in part due to the creation of the two on GitHub were very close in time. In addition, [Drrtuy has also submitted a pull request (PR) to MariaDB](https://github.com/MariaDB/server/pull/4830) to include his work. We were not aware of either the repository or PR during development and we take no position on either. 
+There has been confusion about [HolyDuck](https://github.com/eriksquires/holyduck)’s provenance relative to [duckdb-engine](https://github.com/drrtuy/duckdb-engine/tree/master), also hosted on GitHub and authored by drrtuy. This may be in part due to the two repositories appearing on GitHub at roughly the same time. In addition, [Drrtuy has also submitted a pull request (PR) to MariaDB](https://github.com/MariaDB/server/pull/4830) to include his work. We were not aware of either the repository or PR during development and we take no position on either.
 
 Relatedly, drrtuy has suggested that HolyDuck should acknowledge both his project and AliSQL as predecessors. We do not agree, and we discuss that in detail in [HD_vs_AliSQL](HD_vs_AliSQL.md).
+
+To address a broad, non-specific claim efficiently, we asked ChatGPT to perform a line-by-line inspection of both repositories. The findings are included below. We also wanted to rule out the possibility that the use of AI coding tools such as Claude might have introduced material from another project without our knowledge, so this independent review was worthwhile for that reason as well.
 
 Anyone is free to inspect the code directly, but the major structural differences should already be enough to convince a casual reader that HolyDuck is not a clone of either project. The single most important point is this:
 
 - HolyDuck fully supports cross-engine joins between InnoDB and DuckDB.
-- AliSQL and, by extension, duckdb-engine expect all tables to be in DuckDB. 
+- AliSQL and, by extension, duckdb-engine expect all tables to be in DuckDB.
 
-For anyone familiar with MariaDB storage engines, that point alone should be highly informative. 
+For anyone familiar with MariaDB storage engines, that point alone should be highly informative.
 
-**HolyDuck** did not intentionally take code from AliSQL, duckdb-engine, or any other project that is not already attributed. ChatGPT’s inspection also concluded that we did not accidentally incorporate material from duckdb-engine. Where HolyDuck uses external code or libraries, we attempt to provide all necessary attributions and  notices. If we are mistaken, please point to the specific code sections and we will review and correct the issue with due diligence. We are happy to correct the record and/or enhance missing copyright notices where appropriate. 
-
-To address a broad, non-specific claim efficiently, we asked ChatGPT to perform a line-by-line inspection of both repositories. The findings are included below. We also wanted to rule out the possibility that the use of AI coding tools such as Claude might have introduced material from another project without our knowledge, so this independent review was worthwhile for that reason as well.
+**HolyDuck** did not intentionally take code from AliSQL, duckdb-engine, or any other project that is not already attributed. ChatGPT’s inspection also concluded that we did not accidentally incorporate material from duckdb-engine. Where HolyDuck uses external code or libraries, we attempt to provide all necessary attributions and notices. If we are mistaken, please point to the specific code sections and we will review and correct the issue with due diligence. We are happy to correct the record and/or enhance missing copyright notices where appropriate.
 
 ---
 
@@ -122,14 +122,14 @@ These are **required patterns**, not evidence of reuse.
 
 ### 3. Execution Model Differences
 
-| Feature                     | HolyDuck                 | duckdb-engine            |
-| --------------------------- | ------------------------ | ------------------------ |
-| Execution control              | DuckDB-centric                      | MariaDB-driven           |
-| Predicate handling             | Pushed into injection + single-scan | Passed through           |
-| Mixed-engine joins             | Supported                           | Not supported            |
-| Data movement                  | Dynamic InnoDB→DuckDB injection     | None                     |
-| Injection caching              | Per-session, row-count invalidation | N/A                      |
-| UPDATE/DELETE                  | Statement-level pushdown            | Original query execution |
+| Feature                | HolyDuck                            | duckdb-engine            |
+| ---------------------- | ----------------------------------- | ------------------------ |
+| Execution control      | DuckDB-centric                      | MariaDB-driven           |
+| Predicate handling     | Pushed into injection + single-scan | Passed through           |
+| Mixed-engine joins     | Supported                           | Not supported            |
+| Data movement          | Dynamic InnoDB→DuckDB injection     | None                     |
+| Injection caching      | Per-session, row-count invalidation | N/A                      |
+| UPDATE/DELETE          | Statement-level pushdown            | Original query execution |
 
 ---
 
