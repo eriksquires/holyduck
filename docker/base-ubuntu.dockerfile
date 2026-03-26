@@ -50,12 +50,7 @@ RUN mysql_install_db --user=mysql --datadir=/var/lib/mysql
 RUN mkdir -p /run/mysqld && chown mysql:mysql /run/mysqld
 
 # Configure MariaDB
-RUN echo "[mysqld]" > /etc/mysql/mariadb.conf.d/50-server.cnf \
-&& echo "bind-address = 0.0.0.0" >> /etc/mysql/mariadb.conf.d/50-server.cnf \
-&& echo "port = 3306" >> /etc/mysql/mariadb.conf.d/50-server.cnf \
-&& echo "innodb_buffer_pool_size = 512M" >> /etc/mysql/mariadb.conf.d/50-server.cnf \
-&& echo "max_connections = 100" >> /etc/mysql/mariadb.conf.d/50-server.cnf \
-&& echo "tmpdir = /var/tmp/mariadb" >> /etc/mysql/mariadb.conf.d/50-server.cnf
+RUN printf '[mysqld]\nbind-address = 0.0.0.0\nport = 3306\ninnodb_buffer_pool_size = 512M\nmax_connections = 100\ntmpdir = /var/tmp/mariadb\n' > /etc/my.cnf
 
 # Install DuckDB CLI
 RUN curl https://install.duckdb.org | sh \
