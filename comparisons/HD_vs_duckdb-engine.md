@@ -158,9 +158,6 @@ The duckdb-engine repository accurately includes attribution to:
 - Alibaba / AliSQL
 - MariaDB Foundation contributors
 
-This suggests:
-> The implementation follows an existing lineage of storage engine patterns
-
 While not necessarily indicating direct line-by-line copying, the structure and patterns used in `duckdb-engine` are consistent with known AliSQL-style storage engine implementations. These similarities are architectural rather than superficial and reflect a particular design lineage. HolyDuck does not follow any of these conventions:
 
 #### Convertor Pattern
