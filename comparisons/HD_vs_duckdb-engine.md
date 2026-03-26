@@ -153,7 +153,7 @@ These are **required patterns**, not evidence of reuse.
 
 ### 5. AliSQL Lineage (duckdb-engine)
 
-The duckdb-engine repository includes attribution to:
+The duckdb-engine repository accurately includes attribution to:
 
 - Alibaba / AliSQL
 - MariaDB Foundation contributors
@@ -161,7 +161,48 @@ The duckdb-engine repository includes attribution to:
 This suggests:
 > The implementation follows an existing lineage of storage engine patterns
 
-HolyDuck does not follow this lineage and was developed independently.
+While not necessarily indicating direct line-by-line copying, the structure and patterns used in `duckdb-engine` are consistent with known AliSQL-style storage engine implementations. These similarities are architectural rather than superficial and reflect a particular design lineage. HolyDuck does not follow any of these conventions:
+
+#### Convertor Pattern
+
+The use of classes such as:
+- `InsertConvertor`
+- `UpdateConvertor`
+- `DeleteConvertor`
+
+suggests a design where MariaDB row-level operations are translated into backend-specific execution steps. This pattern is commonly seen in AliSQL-derived engines, where the storage engine acts as a translation layer between MariaDB’s row-based interface and an underlying execution engine.
+
+#### Per-Thread Context Model
+
+The use of:
+- `thd_get_ha_data`
+- `thd_set_ha_data`
+
+indicates a per-session or per-thread context model. This approach is typical in AliSQL-style engines, where engine state is attached directly to the MariaDB thread context rather than managed through a global registry.
+
+#### Transaction and Lifecycle Integration
+
+The presence of:
+- transaction callbacks
+- batch or delta handling mechanisms
+- explicit lifecycle management tied to MariaDB execution
+
+reflects deeper integration with MariaDB’s internal execution and transaction model. This is consistent with storage engines designed to behave similarly to native engines such as InnoDB.
+
+#### Execution Model Alignment
+
+These patterns collectively align with a design philosophy that:
+- treats the storage engine as both data store and execution unit
+- keeps execution within the engine boundary
+- avoids cross-engine coordination
+
+This approach is characteristic of AliSQL-derived designs, where the optimizer and execution model assume that each engine operates independently. None of this looks like **HolyDuck**. 
+
+---
+
+### Summary
+
+The architectural patterns observed in `duckdb-engine` are consistent with AliSQL-style storage engine design. These include translation layers for DML operations, per-thread context management, and tight integration with MariaDB’s transaction lifecycle. This reflects a different design lineage from HolyDuck, which follows a distinct execution and data flow model.
 
 ---
 
