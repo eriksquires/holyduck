@@ -33,7 +33,6 @@
 #include <string>
 #include <sstream>
 #include <map>
-#include <unordered_set>
 #include <fstream>
 #include <vector>
 #include <regex>
@@ -85,9 +84,15 @@ static std::map<THD*, duckdb::Connection*> g_active_connections;
 //  - Every injection (cached or not) first issues DROP TABLE IF EXISTS to
 //    ensure a clean slate, then CREATE TEMP TABLE — except cache hits which
 //    skip both steps and reuse the existing TEMP TABLE.
-//  - Cache is invalidated when the session ends (close_connection hook).
-//    No mid-session invalidation for InnoDB writes — this is appropriate for
-//    OLAP workloads where dimension tables are rarely modified.
+//  - Cache stores the InnoDB table's stats.records at injection time.  On
+//    every cache lookup, info(HA_STATUS_VARIABLE) is called to refresh the
+//    current row count; if it differs from the stored value the entry is
+//    invalidated and the table is re-injected.  This catches INSERTs and
+//    DELETEs (including TRUNCATE and bulk ETL loads) reliably.  It does NOT
+//    catch count-preserving UPDATEs (e.g. changing a phone number without
+//    adding/removing rows), which is an acceptable trade-off for OLAP
+//    dimension tables that are updated infrequently.
+//  - Cache is also invalidated when the session ends (close_connection hook).
 //
 // Protected by g_duckdb_mutex.
 // ---------------------------------------------------------------------------
@@ -97,8 +102,10 @@ struct THDDuckDBConn {
   duckdb::Connection *conn;
   std::string db_file_path;
 };
-static std::map<THD*, THDDuckDBConn>                              g_thd_conns;
-static std::map<duckdb::Connection*, std::unordered_set<std::string>> g_injected_cache;
+static std::map<THD*, THDDuckDBConn>                                    g_thd_conns;
+// Maps connection → (table_name → stats.records at injection time).
+// A changed row count means the InnoDB table was modified; invalidate + re-inject.
+static std::map<duckdb::Connection*, std::map<std::string, ha_rows>> g_injected_cache;
 
 static int duckdb_close_connection(THD *thd)
 {
@@ -3415,14 +3422,40 @@ static bool inject_table_into_duckdb(duckdb::Connection *conn,
                                       const std::vector<Item *> &push_conds)
 {
   // Cache check: if this table was fully injected on this connection before,
-  // the TEMP TABLE already contains all rows — reuse it.
+  // verify the InnoDB row count hasn't changed since then.  If it matches,
+  // the TEMP TABLE is still valid — skip injection entirely.  If it differs,
+  // the table was modified (INSERT/DELETE/TRUNCATE); invalidate and re-inject.
   {
     mysql_mutex_lock(&g_duckdb_mutex);
-    auto it= g_injected_cache.find(conn);
-    bool cached= (it != g_injected_cache.end() &&
-                  it->second.count(duck_name) > 0);
+    auto conn_it= g_injected_cache.find(conn);
+    bool have_entry= false;
+    ha_rows cached_records= 0;
+    if (conn_it != g_injected_cache.end())
+    {
+      auto tbl_it= conn_it->second.find(duck_name);
+      if (tbl_it != conn_it->second.end())
+      {
+        have_entry= true;
+        cached_records= tbl_it->second;
+      }
+    }
     mysql_mutex_unlock(&g_duckdb_mutex);
-    if (cached) return true;
+
+    if (have_entry)
+    {
+      // Refresh approximate row count from InnoDB and compare.
+      t->file->info(HA_STATUS_VARIABLE);
+      ha_rows current_records= t->file->stats.records;
+      if (current_records == cached_records)
+        return true;  // Cache hit: table unchanged.
+
+      // Row count changed — evict stale entry; fall through to re-inject.
+      mysql_mutex_lock(&g_duckdb_mutex);
+      auto it= g_injected_cache.find(conn);
+      if (it != g_injected_cache.end())
+        it->second.erase(duck_name);
+      mysql_mutex_unlock(&g_duckdb_mutex);
+    }
   }
 
   // Drop any pre-existing TEMP TABLE for this name.  With a persistent per-THD
@@ -3526,12 +3559,13 @@ static bool inject_table_into_duckdb(duckdb::Connection *conn,
 
   t->read_set = saved_read_set;
 
-  // Cache successful full (unfiltered) injections so subsequent queries in
-  // this session can skip the ha_rnd_next + Appender loop entirely.
+  // Cache successful full (unfiltered) injections.  Store the current row
+  // count so future lookups can detect InnoDB modifications.
   if (ok && push_conds.empty())
   {
+    t->file->info(HA_STATUS_VARIABLE);
     mysql_mutex_lock(&g_duckdb_mutex);
-    g_injected_cache[conn].insert(duck_name);
+    g_injected_cache[conn][duck_name]= t->file->stats.records;
     mysql_mutex_unlock(&g_duckdb_mutex);
   }
 
