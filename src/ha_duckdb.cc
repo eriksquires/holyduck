@@ -2741,9 +2741,51 @@ static std::string extract_missing_table(const std::string &errmsg);
 static TABLE      *find_open_table_by_name(THD *thd, const std::string &name);
 static With_element *find_cte_by_name(THD *thd, const std::string &name);
 static bool inject_table_into_duckdb(duckdb::Connection *conn, TABLE *table,
-                                     const std::string &temp_name);
+                                     const std::string &temp_name,
+                                     const std::vector<Item *> &push_conds= {});
 static bool inject_cte_into_duckdb(duckdb::Connection *conn, THD *thd,
                                    With_element *cte, const std::string &temp_name);
+
+// ---------------------------------------------------------------------------
+// Predicate pushdown helper for InnoDB injection
+//
+// Collects predicates from a WHERE tree that reference ONLY the given table
+// (i.e., used_tables() ⊆ tbl_map, where tbl_map is the TABLE::map bit for
+// the table being injected).  These predicates are evaluated row-by-row
+// inside inject_table_into_duckdb so non-matching rows are never appended
+// to the DuckDB TEMP TABLE.
+//
+// Walks AND conjuncts recursively; non-AND nodes that also reference other
+// tables are skipped (cannot be pushed to a single-table scan).
+// ---------------------------------------------------------------------------
+static void collect_single_table_conds(Item *cond, table_map tbl_map,
+                                        std::vector<Item *> &out)
+{
+  if (!cond) return;
+  // If the entire subtree only touches this table (and constants), take it.
+  // Exclude predicates that contain subqueries: calling val_int() on an
+  // Item_in_subselect during a ha_rnd_next loop crashes because the subquery
+  // needs its own execution context (Item_func::fix_fields → Eq_creator::create
+  // → SIGSEGV, confirmed via GDB backtrace on Q20).
+  if ((cond->used_tables() & ~tbl_map) == 0 && !cond->with_subquery())
+  {
+    out.push_back(cond);
+    return;
+  }
+  // If it's a top-level AND, recurse into each argument looking for
+  // conjuncts that are single-table even if the overall AND is not.
+  if (cond->type() == Item::COND_ITEM)
+  {
+    Item_cond *ic= static_cast<Item_cond *>(cond);
+    if (ic->functype() == Item_func::COND_AND_FUNC)
+    {
+      List_iterator<Item> li(*ic->argument_list());
+      Item *child;
+      while ((child= li++))
+        collect_single_table_conds(child, tbl_map, out);
+    }
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Select handler — full query pushdown
@@ -3044,7 +3086,12 @@ int ha_duckdb_select_handler::init_scan()
           if (tl->with)
             ok= inject_cte_into_duckdb(connection, thd, tl->with, tname);
           else
-            ok= inject_table_into_duckdb(connection, tl->table, tname);
+          {
+            std::vector<Item *> push_conds;
+            if (sel && sel->where)
+              collect_single_table_conds(sel->where, tl->table->map, push_conds);
+            ok= inject_table_into_duckdb(connection, tl->table, tname, push_conds);
+          }
 
           if (ok)
             strip_schema_for_table(sql, tname);
@@ -3281,7 +3328,8 @@ static With_element *find_cte_by_name(THD *thd, const std::string &name)
 // Uses CREATE TEMP TABLE IF NOT EXISTS so double-injection is harmless.
 static bool inject_table_into_duckdb(duckdb::Connection *conn,
                                       TABLE *t,
-                                      const std::string &duck_name)
+                                      const std::string &duck_name,
+                                      const std::vector<Item *> &push_conds)
 {
   // Build CREATE TEMP TABLE with the same schema as the MariaDB table
   std::ostringstream create_sql;
@@ -3321,6 +3369,14 @@ static bool inject_table_into_duckdb(duckdb::Connection *conn,
     int rc;
     while ((rc = t->file->ha_rnd_next(t->record[0])) == 0)
     {
+      // Evaluate pushed-down single-table predicates; skip non-matching rows.
+      if (!push_conds.empty())
+      {
+        bool pass= true;
+        for (Item *pred : push_conds)
+          if (!pred->val_int()) { pass= false; break; }
+        if (!pass) continue;
+      }
       appender.BeginRow();
       for (uint i = 0; i < t->s->fields; i++)
       {
