@@ -1682,6 +1682,19 @@ int ha_duckdb::rnd_init(bool scan)
     if (!pushed_where.empty())
       sql += " WHERE " + pushed_where;
 
+    // Set search_path so bare table names in pushed subquery conditions
+    // (e.g. correlated subqueries injected by cond_push) resolve correctly.
+    {
+      THD *thd= ha_thd();
+      if (thd && thd->db.str && thd->db.length)
+      {
+        std::string sp= "SET search_path = '";
+        sp += std::string(thd->db.str, thd->db.length);
+        sp += "'";
+        connection->Query(sp);
+      }
+    }
+
     register_active_connection(ha_thd(), connection);
     auto r= connection->Query(sql);
     unregister_active_connection(ha_thd());
@@ -2256,7 +2269,16 @@ static std::string fix_bare_joins(const std::string &sql)
     while (i < n && isspace((unsigned char)sql[i]))
       out += sql[i++];
 
+    // Helper: skip an unquoted SQL identifier ([A-Za-z_][A-Za-z0-9_]*).
+    auto skip_unquoted_id = [&](size_t pos) -> size_t {
+      while (pos < n && (isalnum((unsigned char)sql[pos]) || sql[pos] == '_'))
+        ++pos;
+      return pos;
+    };
+
     // 3. Emit table name: optional "schema". prefix + "table".
+    //    Handles both double-quoted identifiers (from AST-printer path after
+    //    backtick→double-quote conversion) and unquoted names (original SQL).
     if (i < n && sql[i] == '"') {
       size_t end = skip_quoted_id(i);
       out.append(sql, i, end - i);
@@ -2267,16 +2289,44 @@ static std::string fix_bare_joins(const std::string &sql)
         out.append(sql, i, end - i);
         i = end;
       }
+    } else if (i < n && (isalpha((unsigned char)sql[i]) || sql[i] == '_')) {
+      size_t end = skip_unquoted_id(i);
+      out.append(sql, i, end - i);
+      i = end;
+      if (i < n && sql[i] == '.') {
+        out += sql[i++];
+        end = skip_unquoted_id(i);
+        out.append(sql, i, end - i);
+        i = end;
+      }
     }
 
-    // 4. Emit optional alias: a quoted identifier not immediately followed
-    //    by '.' (which would indicate another schema.table, not an alias).
+    // 4. Emit optional alias: a quoted or unquoted identifier not immediately
+    //    followed by '.' (which would indicate schema.table, not an alias).
     {
       size_t j = i;
       while (j < n && isspace((unsigned char)sql[j])) ++j;
       if (j < n && sql[j] == '"') {
         size_t alias_end = skip_quoted_id(j);
         if (alias_end >= n || sql[alias_end] != '.') {
+          out.append(sql, i, alias_end - i);  // whitespace + alias
+          i = alias_end;
+        }
+      } else if (j < n && (isalpha((unsigned char)sql[j]) || sql[j] == '_')) {
+        size_t alias_end = skip_unquoted_id(j);
+        // Only treat it as an alias if it's not a SQL keyword (ON, USING,
+        // WHERE, etc.) — those belong to step 6 or the outer query.
+        std::string tok = sql.substr(j, alias_end - j);
+        for (char &c : tok) c = (char)tolower((unsigned char)c);
+        static const char * const kw_not_alias[] = {
+          "on", "using", "where", "group", "order", "having",
+          "limit", "union", "inner", "outer", "left", "right",
+          "cross", "natural", "join", "set", nullptr
+        };
+        bool is_keyword = false;
+        for (int ki = 0; kw_not_alias[ki]; ++ki)
+          if (tok == kw_not_alias[ki]) { is_keyword = true; break; }
+        if (!is_keyword && (alias_end >= n || sql[alias_end] != '.')) {
           out.append(sql, i, alias_end - i);  // whitespace + alias
           i = alias_end;
         }
@@ -2730,6 +2780,23 @@ static select_handler *create_duckdb_select_handler(THD *thd, SELECT_LEX *sel,
       }
     }
   }
+  // If the top-level SELECT has no DuckDB leaf, check subquery tables via
+  // thd->lex->query_tables (covers all levels of the query tree).  This
+  // handles queries like Q20 where the outer FROM is all-InnoDB but subqueries
+  // reference DuckDB tables — without this, the select handler is never
+  // invoked and MariaDB falls back to a catastrophically slow nested-loop.
+  if (!duckdb_leaf)
+  {
+    for (TABLE_LIST *tl= thd->lex->query_tables; tl; tl= tl->next_global)
+    {
+      if (tl->table && tl->table->file->ht == duckdb_hton)
+      {
+        duckdb_leaf= tl;
+        all_duckdb= false;
+        break;
+      }
+    }
+  }
   if (!duckdb_leaf) return nullptr;
 
   ha_duckdb *h= static_cast<ha_duckdb*>(duckdb_leaf->table->file);
@@ -2883,22 +2950,75 @@ int ha_duckdb_select_handler::init_scan()
   }
   else
   {
-    // Mixed-engine or complex path: reconstruct SQL from MariaDB's parse tree.
-    // lex_unit is set for UNION/INTERSECT/EXCEPT (create_unit path);
-    // select_lex is set for plain SELECT (create_select path).
-    String query_str;
+    // Mixed-engine path: InnoDB tables will be injected into DuckDB as TEMP
+    // TABLEs so the full query executes inside DuckDB.
+    //
+    // For UNION/INTERSECT/EXCEPT (lex_unit) we must use the AST printer because
+    // the original SQL string is the raw client text which may not reconstruct
+    // cleanly across set-operation boundaries.
+    //
+    // For plain SELECT (select_lex) we prefer the original SQL string — the
+    // same approach as Path A (use_original_sql).  The AST printer converts
+    // NOT IN → NOT EXISTS and inlines other optimizer artifacts, which can drop
+    // correlation predicates and produce wrong results.  The original string
+    // preserves the user's intent; rewrite_original_sql handles the few
+    // MariaDB→DuckDB syntax differences (INTERVAL, DATE literals, etc.).
     if (lex_unit)
+    {
+      String query_str;
       lex_unit->print(&query_str, QT_ORDINARY);
+      sql.assign(query_str.ptr(), query_str.length());
+      for (char &c : sql)
+        if (c == '`') c = '"';
+      sql= rewrite_mariadb_sql(sql);
+    }
     else
-      select_lex->print(thd, &query_str, QT_ORDINARY);
-    sql.assign(query_str.ptr(), query_str.length());
+    {
+      // Use original client SQL — identical to Path A's SQL retrieval.
+      const char *qstr= thd->query();
+      size_t      qlen= thd->query_length();
+      sql.assign(qstr ? qstr : "", qlen);
 
-    // MariaDB print() uses backtick quoting; DuckDB expects double quotes.
-    for (char &c : sql)
-      if (c == '`') c = '"';
+      // CTAS: strip "CREATE TABLE ... AS" prefix, keep only the SELECT.
+      {
+        size_t n= sql.size();
+        for (size_t i= 0; i + 4 < n; i++)
+        {
+          if (tolower((unsigned char)sql[i])   == 'a' &&
+              tolower((unsigned char)sql[i+1]) == 's' &&
+              isspace((unsigned char)sql[i+2]))
+          {
+            size_t j= i + 3;
+            while (j < n && isspace((unsigned char)sql[j])) j++;
+            auto starts_with_kw= [&](const char *kw, size_t klen) {
+              if (j + klen > n) return false;
+              for (size_t k= 0; k < klen; k++)
+                if (tolower((unsigned char)sql[j+k]) != kw[k]) return false;
+              return (j + klen >= n || !isalnum((unsigned char)sql[j+klen]));
+            };
+            if (starts_with_kw("select", 6) || starts_with_kw("with", 4))
+            {
+              sql= sql.substr(j);
+              break;
+            }
+          }
+        }
+      }
 
-    // Rewrite MariaDB AST artifacts and function name differences.
-    sql= rewrite_mariadb_sql(sql);
+      for (char &c : sql)
+        if (c == '`') c = '"';
+
+      sql= rewrite_original_sql(sql);
+
+      // Point DuckDB at the current schema for unqualified table names.
+      if (thd->db.str && thd->db.length)
+      {
+        std::string use_stmt= "SET search_path = '";
+        use_stmt += std::string(thd->db.str, thd->db.length);
+        use_stmt += "'";
+        connection->Query(use_stmt);
+      }
+    }
 
     // Inject all non-DuckDB leaf tables (InnoDB, CTE-backed) into DuckDB as
     // TEMP TABLEs so the full query — including ORDER BY, GROUP BY, HAVING —
@@ -2912,6 +3032,11 @@ int ha_duckdb_select_handler::init_scan()
         while ((tl= it++))
         {
           if (!tl->table || tl->table->file->ht == duckdb_hton)
+            continue;
+          // Derived tables (subqueries in FROM) cannot be row-scanned here;
+          // DuckDB resolves them from the original SQL, and the retry loop
+          // below injects any InnoDB tables they reference.
+          if (tl->derived)
             continue;
 
           std::string tname(tl->table->s->table_name.str);
@@ -2930,8 +3055,8 @@ int ha_duckdb_select_handler::init_scan()
       }
     }
 
-    // Fix bare JOINs: MariaDB's printer emits CROSS JOIN and bare INNER JOINs
-    // without ON clauses in both the derived and select paths.
+    // Fix bare JOINs: only needed for the AST-printer (lex_unit) path, but
+    // harmless to run on the original-SQL path too.
     sql= fix_bare_joins(sql);
   }
 
@@ -3088,14 +3213,28 @@ create_duckdb_unit_handler(THD *thd, SELECT_LEX_UNIT *unit)
 // Returns the table name, or "" if the error is not a missing-table error.
 static std::string extract_missing_table(const std::string &errmsg)
 {
-  static const char kPrefix1[] = "Table with name '";
+  // "Table with name 'X'" (quoted, older DuckDB format)
+  // "Table with name X does not exist" (unquoted, newer DuckDB format)
+  static const char kPrefix1[] = "Table with name ";
   size_t pos = errmsg.find(kPrefix1);
   if (pos != std::string::npos)
   {
     pos += sizeof(kPrefix1) - 1;
-    size_t end = errmsg.find('\'', pos);
-    if (end != std::string::npos)
-      return errmsg.substr(pos, end - pos);
+    if (pos < errmsg.size() && errmsg[pos] == '\'')
+    {
+      pos++;  // skip opening quote
+      size_t end = errmsg.find('\'', pos);
+      if (end != std::string::npos)
+        return errmsg.substr(pos, end - pos);
+    }
+    else
+    {
+      // Unquoted: name ends at first space or newline
+      size_t end = errmsg.find_first_of(" \n\r", pos);
+      if (end == std::string::npos) end = errmsg.size();
+      if (end > pos)
+        return errmsg.substr(pos, end - pos);
+    }
   }
   static const char kPrefix2[] = "Referenced table \"";
   pos = errmsg.find(kPrefix2);
