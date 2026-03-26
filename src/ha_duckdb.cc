@@ -33,6 +33,7 @@
 #include <string>
 #include <sstream>
 #include <map>
+#include <unordered_set>
 #include <fstream>
 #include <vector>
 #include <regex>
@@ -69,6 +70,54 @@ static mysql_mutex_t g_duckdb_mutex;
 // Protected by g_duckdb_mutex.
 // ---------------------------------------------------------------------------
 static std::map<THD*, duckdb::Connection*> g_active_connections;
+
+// ---------------------------------------------------------------------------
+// Per-session DuckDB connection and TEMP TABLE injection cache
+//
+// Each MariaDB session (THD) gets one persistent DuckDB connection that is
+// reused across all queries in the session.  TEMP TABLEs injected from InnoDB
+// persist in the connection, so subsequent queries referencing the same
+// dimension table skip the ha_rnd_next + Appender loop entirely.
+//
+// Cache correctness rules:
+//  - Only FULL (unfiltered) injections are cached; filtered injections are
+//    not cached because they may contain only a subset of rows.
+//  - Every injection (cached or not) first issues DROP TABLE IF EXISTS to
+//    ensure a clean slate, then CREATE TEMP TABLE — except cache hits which
+//    skip both steps and reuse the existing TEMP TABLE.
+//  - Cache is invalidated when the session ends (close_connection hook).
+//    No mid-session invalidation for InnoDB writes — this is appropriate for
+//    OLAP workloads where dimension tables are rarely modified.
+//
+// Protected by g_duckdb_mutex.
+// ---------------------------------------------------------------------------
+static void registry_release(const std::string &path);  // defined below
+
+struct THDDuckDBConn {
+  duckdb::Connection *conn;
+  std::string db_file_path;
+};
+static std::map<THD*, THDDuckDBConn>                              g_thd_conns;
+static std::map<duckdb::Connection*, std::unordered_set<std::string>> g_injected_cache;
+
+static int duckdb_close_connection(THD *thd)
+{
+  mysql_mutex_lock(&g_duckdb_mutex);
+  auto it= g_thd_conns.find(thd);
+  if (it != g_thd_conns.end())
+  {
+    duckdb::Connection *conn= it->second.conn;
+    std::string path= it->second.db_file_path;
+    g_injected_cache.erase(conn);
+    g_thd_conns.erase(it);
+    mysql_mutex_unlock(&g_duckdb_mutex);
+    delete conn;
+    registry_release(path);
+  }
+  else
+    mysql_mutex_unlock(&g_duckdb_mutex);
+  return 0;
+}
 
 static void register_active_connection(THD *thd, duckdb::Connection *conn)
 {
@@ -504,6 +553,7 @@ static int duckdb_init_func(void *p)
   duckdb_hton->discover_table_existence=  duckdb_discover_table_existence;
   duckdb_hton->kill_query=                duckdb_kill_query;
   duckdb_hton->show_status=               duckdb_show_status;
+  duckdb_hton->close_connection=          duckdb_close_connection;
   duckdb_hton->flags=           0;
   duckdb_hton->tablefile_extensions= ha_duckdb_exts;
 
@@ -2845,6 +2895,21 @@ static select_handler *create_duckdb_select_handler(THD *thd, SELECT_LEX *sel,
   if (h->db_file_path.empty())
     return nullptr;
 
+  // Reuse the per-THD persistent connection if one already exists for this
+  // database file.  This allows TEMP TABLEs injected in a previous query to
+  // survive into the next query in the same session (see g_injected_cache).
+  {
+    mysql_mutex_lock(&g_duckdb_mutex);
+    auto it= g_thd_conns.find(thd);
+    if (it != g_thd_conns.end() && it->second.db_file_path == h->db_file_path)
+    {
+      duckdb::Connection *conn= it->second.conn;
+      mysql_mutex_unlock(&g_duckdb_mutex);
+      return new ha_duckdb_select_handler(thd, sel, conn, all_duckdb);
+    }
+    mysql_mutex_unlock(&g_duckdb_mutex);
+  }
+
   duckdb::DuckDB *db= registry_get(h->db_file_path);
   if (!db) return nullptr;
 
@@ -2852,7 +2917,12 @@ static select_handler *create_duckdb_select_handler(THD *thd, SELECT_LEX *sel,
   try { conn= new duckdb::Connection(*db); }
   catch (...) { registry_release(h->db_file_path); return nullptr; }
 
-  // registry_release will be called in the handler destructor
+  // Store in per-THD map; registry_release deferred to duckdb_close_connection.
+  {
+    mysql_mutex_lock(&g_duckdb_mutex);
+    g_thd_conns[thd]= {conn, h->db_file_path};
+    mysql_mutex_unlock(&g_duckdb_mutex);
+  }
   return new ha_duckdb_select_handler(thd, sel, conn, all_duckdb);
 }
 
@@ -2876,7 +2946,20 @@ ha_duckdb_select_handler::ha_duckdb_select_handler(THD *thd,
 ha_duckdb_select_handler::~ha_duckdb_select_handler()
 {
   delete result;
-  delete connection;
+  // connection is owned by g_thd_conns (per-THD persistent connection).
+  // It is deleted in duckdb_close_connection when the session ends.
+  // Exception: the unit handler (UNION path) still creates its own private
+  // connection that is not stored in g_thd_conns — detect this by checking
+  // whether the connection is registered.
+  bool owned_by_thd= false;
+  {
+    mysql_mutex_lock(&g_duckdb_mutex);
+    auto it= g_thd_conns.find(thd);
+    owned_by_thd= (it != g_thd_conns.end() && it->second.conn == connection);
+    mysql_mutex_unlock(&g_duckdb_mutex);
+  }
+  if (!owned_by_thd)
+    delete connection;
 }
 
 // ---------------------------------------------------------------------------
@@ -3331,9 +3414,25 @@ static bool inject_table_into_duckdb(duckdb::Connection *conn,
                                       const std::string &duck_name,
                                       const std::vector<Item *> &push_conds)
 {
+  // Cache check: if this table was fully injected on this connection before,
+  // the TEMP TABLE already contains all rows — reuse it.
+  {
+    mysql_mutex_lock(&g_duckdb_mutex);
+    auto it= g_injected_cache.find(conn);
+    bool cached= (it != g_injected_cache.end() &&
+                  it->second.count(duck_name) > 0);
+    mysql_mutex_unlock(&g_duckdb_mutex);
+    if (cached) return true;
+  }
+
+  // Drop any pre-existing TEMP TABLE for this name.  With a persistent per-THD
+  // connection a previous query may have left a filtered (partial) copy; we
+  // need a clean slate before injecting (possibly with different predicates).
+  conn->Query("DROP TABLE IF EXISTS \"" + duck_name + "\"");
+
   // Build CREATE TEMP TABLE with the same schema as the MariaDB table
   std::ostringstream create_sql;
-  create_sql << "CREATE TEMP TABLE IF NOT EXISTS \"" << duck_name << "\" (";
+  create_sql << "CREATE TEMP TABLE \"" << duck_name << "\" (";
   for (uint i = 0; i < t->s->fields; i++)
   {
     if (i > 0) create_sql << ", ";
@@ -3426,6 +3525,16 @@ static bool inject_table_into_duckdb(duckdb::Connection *conn,
   }
 
   t->read_set = saved_read_set;
+
+  // Cache successful full (unfiltered) injections so subsequent queries in
+  // this session can skip the ha_rnd_next + Appender loop entirely.
+  if (ok && push_conds.empty())
+  {
+    mysql_mutex_lock(&g_duckdb_mutex);
+    g_injected_cache[conn].insert(duck_name);
+    mysql_mutex_unlock(&g_duckdb_mutex);
+  }
+
   return ok;
 }
 
