@@ -13,8 +13,8 @@ The full TPC-H test suite runs successfully with tables split across InnoDB and 
 
 MariaDB is beloved. DuckDB is a miracle of analytical performance and small teams needed a fast OLAP oriented data engine. HolyDuck is that blessing — it embeds DuckDB directly inside MariaDB so you can:
 
-- Run analytical queries (GROUP BY, aggregations, window functions) at DuckDB speed
-- Mix DuckDB and InnoDB tables in the same query — DuckDB for analytics
+- Run analytical queries (GROUP BY, aggregations, window functions) inside DuckDB at DuckDB speed
+- Mix DuckDB and InnoDB tables in the same query without moving tables unnecessarily
 
 HolyDuck is an extremely easy to install, easy to use OLAP engine that lives inside your existing MariaDB data infrastructure.  The speed of a parallel column store database with the convenience of MariaDB with incredibly simple installation. An ideal solution for small teams living in a MariaDB ecosystem.
 
