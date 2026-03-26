@@ -6,7 +6,7 @@ There has been confusion about [HolyDuck](https://github.com/eriksquires/holyduc
 
 To address a broad, non-specific claim efficiently, we asked ChatGPT to perform a line-by-line inspection of both repositories. The findings are included below. We also wanted to rule out the possibility that the use of AI coding tools such as Claude might have introduced material from another project without our knowledge, so this independent review was worthwhile for that reason as well.
 
-Relatedly, drrtuy has suggested that HolyDuck should acknowledge AliSQL. We do not agree, and we discuss that in detail in [HOLYDUCK_VS_ALISQL](HOLYDUCK_VS_ALISQL.md).
+Relatedly, drrtuy has suggested that HolyDuck should acknowledge AliSQL. We do not agree, and we discuss that in detail in [HD_vs_AliSQL](HD_vs_AliSQL.md).
 
 Anyone is free to inspect the code directly, but the major structural differences should already be enough to convince a casual reader that HolyDuck is not a clone of either project. The single most important point is this:
 
