@@ -69,10 +69,19 @@ When you `EXPLAIN` a cross-engine query, `PUSHED SELECT` confirms DuckDB is doin
 
 ### When to Think About Query Shape
 
-The one case worth considering is a genuinely large InnoDB table. Injection reads the entire
-InnoDB table and copies it into DuckDB. If that table has millions of rows, pre-aggregating the
-DuckDB side first via a CTE can help — DuckDB produces a small result set, and MariaDB joins
-that against InnoDB using its own indexes rather than copying the whole table across.
+For most workloads, write queries naturally. `PUSHED SELECT` will fire and DuckDB will handle
+the entire query — joins, aggregation, and all — with InnoDB dimension tables injected
+automatically. Two optimizations mean injection is rarely the bottleneck:
+
+- **Predicate pushdown** — if your query filters an InnoDB table, only matching rows are
+  injected, not the full table.
+- **Injection caching** — within a session, a table that has already been injected is reused
+  on subsequent queries at no cost.
+
+The only case worth restructuring is a large InnoDB table with no selective predicate — where
+injection would copy millions of rows and nothing filters them down first. In that situation,
+pre-aggregating the DuckDB side in a CTE causes `PUSHED DERIVED` to fire instead, and MariaDB
+joins the small result against InnoDB via index lookups:
 
 ```sql
 WITH sales_summary AS (
@@ -94,11 +103,11 @@ JOIN regions r ON ss.region_id = r.id
 ORDER BY ss.total_sales DESC;
 ```
 
-Here `PUSHED DERIVED` fires on `sales_summary` — DuckDB aggregates to ~50 rows, and MariaDB
-joins those against InnoDB. No large injection needed.
+`PUSHED DERIVED` fires on `sales_summary` — DuckDB aggregates to a small result set, and
+MariaDB joins those rows against InnoDB. No large injection needed.
 
-Wait until you feel actual performance pain before restructuring queries. Most workloads won't
-need it.
+Use this pattern only after confirming with `EXPLAIN` that injection cost is the actual
+problem. For most queries it will not be.
 
 
 ---
