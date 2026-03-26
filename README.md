@@ -35,8 +35,8 @@ Another important limitation is that MariaDB enforces it's SQL language idioms. 
 - [BUILDING.md](BUILDING.md)
 - [SQL Guidelines](WRITING_SQL.md)
 - Comparison Guides:
-  - [ColumnStore](comparisons/HD_VS_CS.md)
-  - [AliSQL](comparisons/HD_VS_ALISQL.md) 
+  - [ColumnStore](comparisons/HD_vs_CS.md)
+  - [AliSQL](comparisons/HD_vs_ALISQL.md) 
 
 
 ## License
