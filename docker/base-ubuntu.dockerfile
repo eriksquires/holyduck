@@ -54,15 +54,17 @@ RUN echo "[mysqld]" > /etc/mysql/mariadb.conf.d/50-server.cnf \
 && echo "bind-address = 0.0.0.0" >> /etc/mysql/mariadb.conf.d/50-server.cnf \
 && echo "port = 3306" >> /etc/mysql/mariadb.conf.d/50-server.cnf \
 && echo "innodb_buffer_pool_size = 512M" >> /etc/mysql/mariadb.conf.d/50-server.cnf \
-&& echo "max_connections = 100" >> /etc/mysql/mariadb.conf.d/50-server.cnf
+&& echo "max_connections = 100" >> /etc/mysql/mariadb.conf.d/50-server.cnf \
+&& echo "tmpdir = /var/tmp/mariadb" >> /etc/mysql/mariadb.conf.d/50-server.cnf
 
 # Install DuckDB CLI
 RUN curl https://install.duckdb.org | sh \
  && ln -s /root/.duckdb/cli/latest/duckdb /usr/local/bin/duckdb
 
-# Create workspace directories
+# Create workspace and temp directories
 WORKDIR /workspace
-RUN mkdir -p /plugin-src /mariadb-src /build
+RUN mkdir -p /plugin-src /mariadb-src /build /var/tmp/mariadb \
+ && chown mysql:mysql /var/tmp/mariadb
 
 # Create startup script for MariaDB
 RUN echo '#!/bin/bash' > /usr/local/bin/start-mariadb.sh \
