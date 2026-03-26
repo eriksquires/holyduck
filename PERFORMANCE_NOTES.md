@@ -162,6 +162,30 @@ parallelism doesn't help the common case.
 
 ---
 
+## Known Bugs
+
+### UNION queries broken in mixed-mode (MM/SM)
+
+**Status:** Not fixed.
+
+Queries using `UNION`, `INTERSECT`, or `EXCEPT` go through the AST printer
+path (`lex_unit->print()`) instead of the original-SQL path used by plain
+`SELECT`.  The AST printer has the same class of bugs that were fixed for
+plain SELECTs: it drops correlation predicates, mangles certain join syntax,
+and may mis-quote identifiers.
+
+None of the 22 standard TPC-H queries use top-level UNION, so this does not
+affect the benchmark.  User queries combining mixed-engine results with set
+operations will produce wrong results or errors.
+
+**Approach:** Identify which set-operation queries are affected and apply the
+same original-SQL approach where possible.  For cases where the original SQL
+cannot be recovered cleanly (e.g. statement-level rewriting), find a safe
+AST-printer path or reject the query with a clear error rather than returning
+silently wrong results.
+
+---
+
 ## SM Mode Observations
 
 SM is already 2–4× faster than standalone on most queries because:
