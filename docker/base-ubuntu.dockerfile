@@ -78,6 +78,7 @@ RUN echo '#!/bin/bash' > /usr/local/bin/start-mariadb.sh \
 && echo 'while ! mysqladmin ping --silent; do sleep 1; done' >> /usr/local/bin/start-mariadb.sh \
 && echo 'echo "Setting root password..."' >> /usr/local/bin/start-mariadb.sh \
 && echo 'mysqladmin -u root password "${MYSQL_ROOT_PASSWORD}" 2>/dev/null || true' >> /usr/local/bin/start-mariadb.sh \
+&& echo "mariadb -uroot -p\"\${MYSQL_ROOT_PASSWORD}\" --ssl=0 -e \"GRANT ALL ON *.* TO 'root'@'%' IDENTIFIED BY '\${MYSQL_ROOT_PASSWORD}'; FLUSH PRIVILEGES;\" 2>/dev/null || true" >> /usr/local/bin/start-mariadb.sh \
 && echo 'echo "MariaDB is ready!"' >> /usr/local/bin/start-mariadb.sh \
 && chmod +x /usr/local/bin/start-mariadb.sh
 
