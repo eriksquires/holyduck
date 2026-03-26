@@ -3116,24 +3116,27 @@ int ha_duckdb_select_handler::init_scan()
     // Mixed-engine path: InnoDB tables will be injected into DuckDB as TEMP
     // TABLEs so the full query executes inside DuckDB.
     //
-    // For UNION/INTERSECT/EXCEPT (lex_unit) we must use the AST printer because
-    // the original SQL string is the raw client text which may not reconstruct
-    // cleanly across set-operation boundaries.
-    //
-    // For plain SELECT (select_lex) we prefer the original SQL string — the
-    // same approach as Path A (use_original_sql).  The AST printer converts
-    // NOT IN → NOT EXISTS and inlines other optimizer artifacts, which can drop
+    // For both UNION/INTERSECT/EXCEPT (lex_unit) and plain SELECT (select_lex)
+    // use the original client SQL string.  The AST printer converts NOT IN →
+    // NOT EXISTS and inlines other optimizer artifacts, which can drop
     // correlation predicates and produce wrong results.  The original string
     // preserves the user's intent; rewrite_original_sql handles the few
     // MariaDB→DuckDB syntax differences (INTERVAL, DATE literals, etc.).
     if (lex_unit)
     {
-      String query_str;
-      lex_unit->print(&query_str, QT_ORDINARY);
-      sql.assign(query_str.ptr(), query_str.length());
+      const char *qstr= thd->query();
+      size_t      qlen= thd->query_length();
+      sql.assign(qstr ? qstr : "", qlen);
       for (char &c : sql)
         if (c == '`') c = '"';
-      sql= rewrite_mariadb_sql(sql);
+      sql= rewrite_original_sql(sql);
+      if (thd->db.str && thd->db.length)
+      {
+        std::string use_stmt= "SET search_path = '";
+        use_stmt += std::string(thd->db.str, thd->db.length);
+        use_stmt += "'";
+        connection->Query(use_stmt);
+      }
     }
     else
     {
@@ -3187,8 +3190,15 @@ int ha_duckdb_select_handler::init_scan()
     // TEMP TABLEs so the full query — including ORDER BY, GROUP BY, HAVING —
     // executes entirely inside DuckDB without any MariaDB-side row operations.
     {
-      SELECT_LEX *sel= select_lex;
-      if (sel)
+      // Collect all SELECT_LEX nodes: single select or every UNION/INTERSECT/EXCEPT arm.
+      std::vector<SELECT_LEX *> sels;
+      if (select_lex)
+        sels.push_back(select_lex);
+      else if (lex_unit)
+        for (SELECT_LEX *sl= lex_unit->first_select(); sl; sl= sl->next_select())
+          sels.push_back(sl);
+
+      for (SELECT_LEX *sel : sels)
       {
         List_iterator<TABLE_LIST> it(sel->leaf_tables);
         TABLE_LIST *tl;
@@ -3209,7 +3219,7 @@ int ha_duckdb_select_handler::init_scan()
           else
           {
             std::vector<Item *> push_conds;
-            if (sel && sel->where)
+            if (sel->where)
               collect_single_table_conds(sel->where, tl->table->map, push_conds);
             ok= inject_table_into_duckdb(connection, tl->table, tname, push_conds);
           }
@@ -3223,8 +3233,6 @@ int ha_duckdb_select_handler::init_scan()
       }
     }
 
-    // Fix bare JOINs: only needed for the AST-printer (lex_unit) path, but
-    // harmless to run on the original-SQL path too.
     sql= fix_bare_joins(sql);
   }
 
@@ -3336,24 +3344,40 @@ create_duckdb_unit_handler(THD *thd, SELECT_LEX_UNIT *unit)
 {
   if (!unit) return nullptr;
 
-  // Walk every SELECT arm — all leaf tables must be DUCKDB engine
-  TABLE_LIST *first_table= nullptr;
+  // Require at least one DuckDB leaf across all arms.  Non-DuckDB leaves are
+  // injectable at runtime (same policy as create_duckdb_select_handler).
+  TABLE_LIST *duckdb_leaf= nullptr;
+  bool all_duckdb= true;
   for (SELECT_LEX *sl= unit->first_select(); sl; sl= sl->next_select())
   {
     List_iterator<TABLE_LIST> it(sl->leaf_tables);
     TABLE_LIST *tl;
     while ((tl= it++))
     {
-      if (!tl->table || tl->table->file->ht != duckdb_hton)
-        return nullptr;
-      if (!first_table) first_table= tl;
+      if (!tl->table) continue;
+      if (tl->table->file->ht == duckdb_hton)
+      { if (!duckdb_leaf) duckdb_leaf= tl; }
+      else if (!tl->with)
+        all_duckdb= false;
     }
   }
+  if (!duckdb_leaf) return nullptr;
 
-  if (!first_table) return nullptr;
-
-  ha_duckdb *h= static_cast<ha_duckdb*>(first_table->table->file);
+  ha_duckdb *h= static_cast<ha_duckdb*>(duckdb_leaf->table->file);
   if (h->db_file_path.empty()) return nullptr;
+
+  // Reuse per-THD persistent connection (same logic as create_duckdb_select_handler).
+  {
+    mysql_mutex_lock(&g_duckdb_mutex);
+    auto it= g_thd_conns.find(thd);
+    if (it != g_thd_conns.end() && it->second.db_file_path == h->db_file_path)
+    {
+      duckdb::Connection *conn= it->second.conn;
+      mysql_mutex_unlock(&g_duckdb_mutex);
+      return new ha_duckdb_select_handler(thd, unit, conn, all_duckdb);
+    }
+    mysql_mutex_unlock(&g_duckdb_mutex);
+  }
 
   duckdb::DuckDB *db= registry_get(h->db_file_path);
   if (!db) return nullptr;
@@ -3362,7 +3386,12 @@ create_duckdb_unit_handler(THD *thd, SELECT_LEX_UNIT *unit)
   try { conn= new duckdb::Connection(*db); }
   catch (...) { registry_release(h->db_file_path); return nullptr; }
 
-  return new ha_duckdb_select_handler(thd, unit, conn, /*all_duckdb=*/true);
+  {
+    mysql_mutex_lock(&g_duckdb_mutex);
+    g_thd_conns[thd]= {conn, h->db_file_path};
+    mysql_mutex_unlock(&g_duckdb_mutex);
+  }
+  return new ha_duckdb_select_handler(thd, unit, conn, all_duckdb);
 }
 
 // ---------------------------------------------------------------------------

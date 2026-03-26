@@ -95,12 +95,13 @@ These are **required patterns**, not evidence of reuse.
 
 #### HolyDuck
 
-- Global DuckDB instance registry
-- Per-session persistent connections
-- Active query tracking (for interruption / KILL QUERY)
-- InnoDB → DuckDB injection with caching
-- Predicate rewriting via `cond_push()`
-- Column projection optimization
+- Global DuckDB instance registry (one `duckdb::DuckDB` instance per file, ref-counted)
+- Per-session persistent DuckDB connections (reused across queries within a MariaDB session)
+- Active query tracking (for interruption via `KILL QUERY`)
+- InnoDB → DuckDB table injection with per-session caching and row-count invalidation
+- Single-table predicate pushdown into InnoDB injection (`collect_single_table_conds`) — reduces injected row count for filtered dimension table scans
+- Condition pushdown for single-table DuckDB scans (`cond_push`) — WHERE clause serialised and appended to the pushed-down SELECT
+- Column projection optimization — only referenced columns fetched from DuckDB, mapped back to MariaDB fields via `scan_field_map`
 - Direct UPDATE/DELETE pushdown with reconstructed SQL
 - Cross-engine join execution inside DuckDB
 
@@ -122,12 +123,12 @@ These are **required patterns**, not evidence of reuse.
 
 | Feature                     | HolyDuck                 | duckdb-engine            |
 | --------------------------- | ------------------------ | ------------------------ |
-| Execution control           | DuckDB-centric           | MariaDB-driven           |
-| Predicate handling          | Rewritten + pushed       | Passed through           |
-| Mixed-engine joins          | Supported                | Not supported            |
-| Data movement               | Dynamic injection        | None                     |
-| Intermediate Result Caching | Yes                      | No                       |
-| UPDATE/DELETE               | Statement-level pushdown | Original query execution |
+| Execution control              | DuckDB-centric                      | MariaDB-driven           |
+| Predicate handling             | Pushed into injection + single-scan | Passed through           |
+| Mixed-engine joins             | Supported                           | Not supported            |
+| Data movement                  | Dynamic InnoDB→DuckDB injection     | None                     |
+| Injection caching              | Per-session, row-count invalidation | N/A                      |
+| UPDATE/DELETE                  | Statement-level pushdown            | Original query execution |
 
 ---
 
