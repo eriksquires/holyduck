@@ -7,7 +7,7 @@
 ## What's Unique
 HolyDuck enables true mixed-engine table joins by shifting execution into DuckDB while dynamically sourcing data from both DuckDB and InnoDB tables. Predicates are applied at the appropriate layer to minimize data movement and avoid full table scans.
 
-The full TPC-H test suite runs successfully with tables split across InnoDB and DuckDB, or entirely in DuckDB, with consistently strong performance.
+The full TPC-H test suite runs successfully without changes regardless of which tables are in InnoDB or DuckDB, or entirely in DuckDB, with consistently strong performance.
 
 ## Why
 
