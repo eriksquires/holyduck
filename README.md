@@ -32,7 +32,7 @@ HoldyDuck is much more team friendly in a sense than DuckDB alone but it's a gif
 Alone DuckDB does not handle more than one write connection at a time.  HolyDuck does allows for multiple concurrent users but the entire engine blocks per write operation.  That is, you and your colleagues can open and access the host MariaDB instance and query all the tables you normally would inside and outside of DuckDB but any DuckDB change operations will block all other DuckDB writers.   This naturally promotes a pattern of using DuckDB for scanning very big tables to create smaller InnoDB which need more frequent edits/refactoring.  
 
 ### SQL Dialect
-MariaDB enforces it's SQL language idioms.  You can't run anything against DuckDB that MariaDB won't allow. Put on your pirate boots though, we have [ways around that.](WRITING_SQL.md)
+MariaDB enforces it's SQL language idioms.  You can't run anything SQLthat MariaDB wouldn't already allow. Put on your pirate boots though, we have [ways around that.](WRITING_SQL.md)
 
 ### Transactions
 We don't claim to support them. 
