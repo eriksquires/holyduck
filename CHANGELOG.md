@@ -1,5 +1,60 @@
 # Changelog
 
+## v0.4.0 — 2026-03-27
+
+### Highlights
+
+**UNION/INTERSECT/EXCEPT pushdown in mixed-engine mode** — set operations spanning DuckDB and
+InnoDB tables now execute entirely inside DuckDB. InnoDB tables are injected per arm and the
+full set operation runs natively. All 22 TPC-H queries pass in standalone, SM, and MM modes.
+
+**Filtered injection caching** — predicate pushdown into InnoDB injection is now cached. The
+first query materializes only matching rows into DuckDB; subsequent queries with the same
+predicate skip injection entirely. Cache keys include a hash of the pushed predicates, so a
+query with a different filter re-injects correctly. Large dimension tables with selective
+predicates now pay the injection cost once per session instead of once per query.
+
+### New Features
+
+- **UNION/INTERSECT/EXCEPT in mixed-engine mode** — `create_duckdb_unit_handler` now accepts
+  set operations mixing DuckDB and InnoDB tables. The injection loop walks all arms of the
+  `lex_unit`, injecting any InnoDB table found in any arm before pushing the full original SQL
+  to DuckDB.
+
+- **Filtered injection caching by predicate hash** — `inject_table_into_duckdb` now caches
+  both full and filtered injections. The cache entry stores a hash of the serialized push-down
+  predicates alongside the InnoDB row count. A cache hit requires both to match; a predicate
+  change or row count change triggers eviction and re-injection.
+
+- **Automated multi-distro release script** (`scripts/release.sh`) — builds Ubuntu 22.04,
+  Oracle Linux 8, and Oracle Linux 9 artifacts in sequence, extracts binaries via `docker cp`
+  (distro-agnostic), and packages per-distro tarballs with SQL files.
+
+### Bug Fixes
+
+- TPC-H Q7/Q13/Q16/Q20 fixed in MM mode.
+- Derived table crash fixed.
+- Bare-join rewrite extended to additional MM-mode query shapes.
+
+### Documentation
+
+- **WRITING_SQL.md** — added Transaction Limitations section; updated CTE advice to reflect
+  injection caching (CTE pre-aggregation now only warranted for large unfiltered InnoDB tables);
+  rewrote Views for BI Tools section with cross-engine JOIN view example.
+- Comparison documents moved to `comparisons/` with consistent `HD_vs_` naming.
+
+### Release Artifacts
+
+| File | Description |
+|---|---|
+| `ha_duckdb-v0.4.0-ubuntu.so` | Ubuntu 22.04 (also covers Debian 12) |
+| `ha_duckdb-v0.4.0-oracle8.so` | Oracle Linux 8 |
+| `ha_duckdb-v0.4.0-oracle9.so` | Oracle Linux 9 |
+| `holyduck_duckdb_extensions.sql` | DuckDB macros and views |
+| `holyduck_mariadb_functions.sql` | MariaDB stored functions — install per database as needed |
+
+---
+
 ## v0.3.0 — 2026-03-25
 
 ### Highlights

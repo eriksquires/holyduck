@@ -54,7 +54,7 @@ declare -A BUILD_SUBDIR=(
   [oracle9]="build-oracle9"
   [debian12]="build"
 )
-DISTROS=(ubuntu oracle8 oracle9 debian12)
+DISTROS=(ubuntu oracle8 oracle9)
 
 # ── Build each distro sequentially (one container at a time — shared port 3306)
 for DISTRO in "${DISTROS[@]}"; do
