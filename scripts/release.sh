@@ -60,9 +60,6 @@ DISTROS=(ubuntu oracle8 oracle9 debian12)
 for DISTRO in "${DISTROS[@]}"; do
   CONTAINER="duckdb-plugin-dev-${DISTRO}"
   BUILD_SUB="${BUILD_SUBDIR[$DISTRO]}"
-  PLUGIN_OUT="${PLUGIN_DIR}/plugin-out-${DISTRO}"
-  SO_SRC="${PLUGIN_OUT}/ha_duckdb.so"
-
   echo "━━━  ${DISTRO}  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
   # Check container exists
@@ -99,15 +96,24 @@ for DISTRO in "${DISTROS[@]}"; do
 
   # Build
   info "Building ha_duckdb (${DISTRO})..."
-  docker exec "${CONTAINER}" bash -c \
-    "make -j\$(nproc) -C /plugin-src/${BUILD_SUB} 2>&1" \
-    | grep -E "^(.*error:|.*warning: |Building|Linking|Built target)" || true
-  [[ -f "${SO_SRC}" ]] || die "Build failed — ha_duckdb.so not found at ${SO_SRC}"
-  ok "Build complete: $(ls -sh "${SO_SRC}" | awk '{print $1}')"
+  BUILD_OUTPUT=$(docker exec "${CONTAINER}" bash -c \
+    "make -j\$(nproc) -C /plugin-src/${BUILD_SUB} 2>&1")
+  BUILD_EXIT=$?
+  echo "${BUILD_OUTPUT}" | grep -E "(error:|Built target|Linking)" || true
+  if [[ ${BUILD_EXIT} -ne 0 ]]; then
+    echo "${BUILD_OUTPUT}"
+    die "Build failed for ${DISTRO} (exit ${BUILD_EXIT})"
+  fi
 
-  # Extract artifact
+  # Locate ha_duckdb.so inside the container — don't assume plugin dir path
+  SO_CONTAINER=$(docker exec "${CONTAINER}" \
+    find /usr /plugin-src/"${BUILD_SUB}" -name "ha_duckdb.so" 2>/dev/null | head -1)
+  [[ -n "${SO_CONTAINER}" ]] || die "Build succeeded but ha_duckdb.so not found inside ${CONTAINER}"
+  ok "Built: ${SO_CONTAINER} ($(docker exec "${CONTAINER}" ls -sh "${SO_CONTAINER}" | awk '{print $1}'))"
+
+  # Extract artifact via docker cp — works regardless of bind-mount layout
   SO_DEST="${RELEASE_DIR}/ha_duckdb-${VERSION}-${DISTRO}.so"
-  cp "${SO_SRC}" "${SO_DEST}"
+  docker cp "${CONTAINER}:${SO_CONTAINER}" "${SO_DEST}"
   ok "Copied to release dir."
 
   echo
