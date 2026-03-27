@@ -9,6 +9,8 @@ HolyDuck enables true mixed-engine table joins by shifting execution into DuckDB
 
 The full [TPC-H](https://www.tpc.org/tpch/) test suite runs successfully without changes even when some tables moved out of DuckDB.  Performance degrades but remains remarkably usable throughout. Aggressive caching further improves performance after warming up.
 
+It's also worth noting that HolyDuck uses off-the-shelf duckdb 1.5.0 and off-the-shelf MariaDB.  
+
 ## Why
 
 MariaDB is beloved. DuckDB is a miracle of analytical performance and small teams needed a fast OLAP oriented data engine. HolyDuck is that blessing — it embeds DuckDB directly inside MariaDB so you can:
