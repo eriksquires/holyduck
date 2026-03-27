@@ -141,6 +141,79 @@ as if it were the first time. It has no effect on other sessions.
 
 ---
 
+## Working with Temporary Tables
+
+HolyDuck does not support DuckDB-native temporary tables as queryable MariaDB tables —
+DuckDB TEMP TABLEs are session-scoped within a single DuckDB connection, and HolyDuck's
+table discovery runs on a separate connection, so they are never visible. The following
+patterns cover the common use cases.
+
+### Pattern 1 — MariaDB TEMPORARY TABLE (InnoDB)
+
+Standard MariaDB temporary tables work as expected in scripts. They live in InnoDB, are
+session-scoped, and are dropped automatically when the session ends.
+
+```sql
+CREATE TEMPORARY TABLE my_work AS
+    SELECT category_id, SUM(amount) AS total
+    FROM sales
+    WHERE ts BETWEEN '2026-01-01' AND '2026-03-31'
+    GROUP BY category_id;
+
+SELECT c.name, w.total
+FROM my_work w
+JOIN categories c ON w.category_id = c.id
+ORDER BY w.total DESC;
+```
+
+`my_work` is an InnoDB temp table. When joined against a DuckDB table, HolyDuck injects
+it automatically — the join executes inside DuckDB as normal. The only cost to be aware
+of: if `my_work` is populated from a large DuckDB query, that result travels through
+MariaDB on creation. For large intermediate results, consider Pattern 2 instead.
+
+### Pattern 2 — Persistent DuckDB Table, Dropped Manually
+
+When you need a large intermediate result to stay in DuckDB (avoiding the round-trip
+through MariaDB), use a regular `ENGINE=DUCKDB` table and drop it when you're done.
+
+```sql
+CREATE TABLE my_work ENGINE=DUCKDB AS
+    SELECT category_id, SUM(amount) AS total
+    FROM sales
+    WHERE ts BETWEEN '2026-01-01' AND '2026-03-31'
+    GROUP BY category_id;
+
+-- join, re-query, iterate at DuckDB speed
+SELECT c.name, w.total
+FROM my_work w
+JOIN categories c ON w.category_id = c.id
+ORDER BY w.total DESC;
+
+DROP TABLE my_work;
+```
+
+This is not session-scoped, so include the `DROP TABLE` at the end of your script.
+
+### Pattern 3 — CTE (Single Query)
+
+If the intermediate result is only needed within a single query, a CTE is the cleanest
+option — no table creation or cleanup required, and it pushes down to DuckDB entirely.
+
+```sql
+WITH summary AS (
+    SELECT category_id, SUM(amount) AS total
+    FROM sales
+    WHERE ts BETWEEN '2026-01-01' AND '2026-03-31'
+    GROUP BY category_id
+)
+SELECT c.name, s.total
+FROM summary s
+JOIN categories c ON s.category_id = c.id
+ORDER BY s.total DESC;
+```
+
+---
+
 ## Extending HolyDuck
 
 HolyDuck can be extended by editing `holyduck_duckdb_extensions.sql`. This file is executed
