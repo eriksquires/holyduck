@@ -10,10 +10,10 @@ To address a broad, non-specific claim efficiently, we asked ChatGPT to perform 
 
 Anyone is free to inspect the code directly, but the major structural differences should already be enough to convince a casual reader that HolyDuck is not a clone of either project. The single most important point is this:
 
-- HolyDuck fully supports cross-engine joins between InnoDB and DuckDB.
-- AliSQL and, by extension, duckdb-engine expect all tables to be in DuckDB.
+- HolyDuck fully supports cross-engine joins between InnoDB and DuckDB, and uses off the shelf DuckDB 1.5.0 (for now). 
+- AliSQL and, by extension, duckdb-engine expect all tables to be in DuckDB AND require a custom DuckDB build.
 
-For anyone familiar with MariaDB storage engines, that point alone should be highly informative.
+For anyone familiar with MariaDB storage engines these points should epxlain everything that follows here. 
 
 **HolyDuck** did not intentionally take code from AliSQL, duckdb-engine, or any other project that is not already attributed. ChatGPT’s inspection also concluded that we did not accidentally incorporate material from duckdb-engine. Where HolyDuck uses external code or libraries, we attempt to provide all necessary attributions and notices. If we are mistaken, please point to the specific code sections and we will review and correct the issue with due diligence. We are happy to correct the record and/or enhance missing copyright notices where appropriate.
 
