@@ -10,7 +10,7 @@ SELECT @@plugin_dir;
 
 ### 2. Install libduckdb.so
 
-HolyDuck v0.3.0 requires DuckDB v1.5.0. Download `libduckdb-linux-amd64.zip` from the
+HolyDuck v0.4.0 requires DuckDB v1.5.0. Download `libduckdb-linux-amd64.zip` from the
 [DuckDB releases page](https://github.com/duckdb/duckdb/releases/tag/v1.5.0), then:
 
 ```bash
