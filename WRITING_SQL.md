@@ -125,6 +125,19 @@ MariaDB joins those rows against InnoDB. No large injection needed.
 Use this pattern only after confirming with `EXPLAIN` that injection cost is the actual
 problem. For most queries it will not be.
 
+### Flushing the Injection Cache
+
+HolyDuck automatically invalidates the cache when the InnoDB row count changes (INSERT,
+DELETE, TRUNCATE). The one case it cannot detect is a count-preserving UPDATE — changing
+a value without adding or removing rows. If you update an InnoDB dimension table in-place
+and need the next query to see fresh data, flush the cache manually:
+
+```sql
+SET SESSION duckdb_flush_cache = 1;
+```
+
+This evicts all cached injections for your session. The next query re-injects from InnoDB
+as if it were the first time. It has no effect on other sessions.
 
 ---
 
