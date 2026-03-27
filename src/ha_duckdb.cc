@@ -79,8 +79,9 @@ static std::map<THD*, duckdb::Connection*> g_active_connections;
 // dimension table skip the ha_rnd_next + Appender loop entirely.
 //
 // Cache correctness rules:
-//  - Only FULL (unfiltered) injections are cached; filtered injections are
-//    not cached because they may contain only a subset of rows.
+//  - Both full (unfiltered) and filtered injections are cached.  The cache
+//    entry stores a hash of the push-down predicates so a query with a
+//    different predicate (or no predicate) misses and re-injects.
 //  - Every injection (cached or not) first issues DROP TABLE IF EXISTS to
 //    ensure a clean slate, then CREATE TEMP TABLE — except cache hits which
 //    skip both steps and reuse the existing TEMP TABLE.
@@ -103,9 +104,16 @@ struct THDDuckDBConn {
   std::string db_file_path;
 };
 static std::map<THD*, THDDuckDBConn>                                    g_thd_conns;
-// Maps connection → (table_name → stats.records at injection time).
-// A changed row count means the InnoDB table was modified; invalidate + re-inject.
-static std::map<duckdb::Connection*, std::map<std::string, ha_rows>> g_injected_cache;
+// Maps connection → (table_name → InjCacheEntry{pred_hash, rows}).
+// A predicate mismatch or changed row count triggers eviction and re-injection.
+struct InjCacheEntry {
+  std::string pred_hash;  // "" = unfiltered; hash string = filtered
+  ha_rows     rows;       // InnoDB stats.records at injection time
+};
+// Maps connection → (table_name → current injected entry).
+// Only one entry per (conn, table_name) is live at a time — whichever
+// predicate was used most recently.
+static std::map<duckdb::Connection*, std::map<std::string, InjCacheEntry>> g_injected_cache;
 
 static int duckdb_close_connection(THD *thd)
 {
@@ -3473,6 +3481,22 @@ static With_element *find_cte_by_name(THD *thd, const std::string &name)
   return nullptr;
 }
 
+// Serialize push_conds Items to a stable string and return a hash of it.
+// Returns "" for an empty predicate list (unfiltered injection).
+static std::string hash_push_conds(const std::vector<Item *> &conds)
+{
+  if (conds.empty()) return "";
+  String buf;
+  buf.set("", 0, &my_charset_bin);
+  for (Item *item : conds)
+  {
+    item->print(&buf, QT_ORDINARY);
+    buf.append('\0');
+  }
+  size_t h= std::hash<std::string>{}(std::string(buf.ptr(), buf.length()));
+  return std::to_string(h);
+}
+
 // Inject an already-open MariaDB TABLE into DuckDB as a TEMP TABLE.
 // duck_name is the name DuckDB will see (typically the MariaDB table_name).
 // Uses CREATE TEMP TABLE IF NOT EXISTS so double-injection is harmless.
@@ -3481,35 +3505,38 @@ static bool inject_table_into_duckdb(duckdb::Connection *conn,
                                       const std::string &duck_name,
                                       const std::vector<Item *> &push_conds)
 {
-  // Cache check: if this table was fully injected on this connection before,
-  // verify the InnoDB row count hasn't changed since then.  If it matches,
-  // the TEMP TABLE is still valid — skip injection entirely.  If it differs,
-  // the table was modified (INSERT/DELETE/TRUNCATE); invalidate and re-inject.
+  // Cache check: if this table was injected on this connection before with the
+  // same predicate, verify the InnoDB row count hasn't changed.  If both match,
+  // the TEMP TABLE is still valid — skip injection entirely.  If the predicate
+  // differs or the row count changed, evict and re-inject.
+  const std::string pred_hash= hash_push_conds(push_conds);
   {
     mysql_mutex_lock(&g_duckdb_mutex);
     auto conn_it= g_injected_cache.find(conn);
     bool have_entry= false;
-    ha_rows cached_records= 0;
+    InjCacheEntry cached_entry{};
     if (conn_it != g_injected_cache.end())
     {
       auto tbl_it= conn_it->second.find(duck_name);
       if (tbl_it != conn_it->second.end())
       {
         have_entry= true;
-        cached_records= tbl_it->second;
+        cached_entry= tbl_it->second;
       }
     }
     mysql_mutex_unlock(&g_duckdb_mutex);
 
     if (have_entry)
     {
-      // Refresh approximate row count from InnoDB and compare.
-      t->file->info(HA_STATUS_VARIABLE);
-      ha_rows current_records= t->file->stats.records;
-      if (current_records == cached_records)
-        return true;  // Cache hit: table unchanged.
-
-      // Row count changed — evict stale entry; fall through to re-inject.
+      if (cached_entry.pred_hash == pred_hash)
+      {
+        // Same predicate — check InnoDB row count.
+        t->file->info(HA_STATUS_VARIABLE);
+        ha_rows current_records= t->file->stats.records;
+        if (current_records == cached_entry.rows)
+          return true;  // Cache hit: same predicate, table unchanged.
+      }
+      // Predicate changed or row count changed — evict; fall through to re-inject.
       mysql_mutex_lock(&g_duckdb_mutex);
       auto it= g_injected_cache.find(conn);
       if (it != g_injected_cache.end())
@@ -3619,13 +3646,13 @@ static bool inject_table_into_duckdb(duckdb::Connection *conn,
 
   t->read_set = saved_read_set;
 
-  // Cache successful full (unfiltered) injections.  Store the current row
-  // count so future lookups can detect InnoDB modifications.
-  if (ok && push_conds.empty())
+  // Cache all successful injections (filtered or unfiltered).  Store the
+  // predicate hash and InnoDB row count so future lookups can validate both.
+  if (ok)
   {
     t->file->info(HA_STATUS_VARIABLE);
     mysql_mutex_lock(&g_duckdb_mutex);
-    g_injected_cache[conn][duck_name]= t->file->stats.records;
+    g_injected_cache[conn][duck_name]= InjCacheEntry{pred_hash, t->file->stats.records};
     mysql_mutex_unlock(&g_duckdb_mutex);
   }
 
