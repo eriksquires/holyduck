@@ -65,7 +65,7 @@ These are different questions with different answers.
 
 ### Mixed-Engine Query Handling
 
-As we alluded to at the start, the choice of whether to support mixed-engine joins or not drives most of the code divergence between the two projects. 
+As we alluded to at the start, the choice of whether to support mixed-engine joins or not naturally leads to completely different architectures and code.
 
 **HolyDuck** handles mixed DuckDB + InnoDB queries by injecting InnoDB tables into
 DuckDB as temporary tables at query time, then pushing the entire query — including
