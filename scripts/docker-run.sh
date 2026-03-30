@@ -26,6 +26,15 @@ mkdir -p "${DATA_DIR}"
 PLUGIN_OUT_DIR="${PLUGIN_DIR}/plugin-out-${DISTRO}"
 mkdir -p "${PLUGIN_OUT_DIR}"
 
+# IntensityDB source tree — mounted so its build output lands directly in
+# the plugin dir via CMake LIBRARY_OUTPUT_DIRECTORY.
+INTENSITYDB_DIR="/home/shared/mariadb/intensitydb"
+
+# MariaDB tmpdir on real host filesystem — avoids overlay2 overhead for
+# temp files and makes them inspectable from the host.
+MARIADB_TMP_DIR="${PLUGIN_DIR}/tmp-${DISTRO}"
+mkdir -p "${MARIADB_TMP_DIR}"
+
 # Detect the plugin directory path inside the image (differs by distro).
 PLUGIN_SYSTEM_DIR=$(docker run --rm "mariadb-duckdb-base:${DISTRO}" \
     bash -c "mariadbd --verbose --help 2>/dev/null | awk '/^plugin.dir/{print \$2; exit}'" 2>/dev/null \
@@ -61,6 +70,8 @@ else
         -v "${MARIADB_SRC_DIR}:/mariadb-src:ro" \
         -v "${DATA_DIR}:/var/lib/mysql" \
         -v "${PLUGIN_OUT_DIR}:${PLUGIN_SYSTEM_DIR}" \
+        -v "${INTENSITYDB_DIR}:/intensitydb" \
+        -v "${MARIADB_TMP_DIR}:/var/lib/mysql-tmp" \
         -p 3306:3306 \
         --cap-add=SYS_PTRACE \
         --name "$CONTAINER_NAME" \

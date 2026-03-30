@@ -115,6 +115,37 @@ struct InjCacheEntry {
 // predicate was used most recently.
 static std::map<duckdb::Connection*, std::map<std::string, InjCacheEntry>> g_injected_cache;
 
+// ---------------------------------------------------------------------------
+// Server-wide shared injection cache — unfiltered injections only
+//
+// Instead of each session materialising its own TEMP TABLE copy of an InnoDB
+// table, the first session creates a regular (non-TEMP) DuckDB table named
+// "__sinj_<tablename>" in the shared database file.  Subsequent sessions
+// attach a per-session TEMP VIEW of the same duck_name pointing to it — zero
+// extra data copies regardless of session count.
+//
+// Filtered injections (pred_hash != "") remain per-session TEMP TABLEs;
+// they are query-specific and not worth sharing.
+//
+// Protected by g_duckdb_mutex.
+// ---------------------------------------------------------------------------
+struct SharedInjEntry {
+  std::string shared_name;  // DuckDB table name, e.g. "__sinj_orders"
+  ha_rows     rows;         // InnoDB stats.records at injection time
+};
+// key = "db.table" (fully-qualified MariaDB name), unfiltered only
+static std::map<std::string, SharedInjEntry> g_shared_inj;
+
+// Derive a stable DuckDB shared table name from the duck_name.
+// Replaces non-alphanumeric characters with '_' to keep it a valid identifier.
+static std::string shared_inj_name(const std::string &duck_name)
+{
+  std::string n= "__sinj_";
+  for (char c : duck_name)
+    n += (std::isalnum((unsigned char)c) ? c : '_');
+  return n;
+}
+
 static int duckdb_close_connection(THD *thd)
 {
   mysql_mutex_lock(&g_duckdb_mutex);
@@ -608,6 +639,41 @@ static int duckdb_init_func(void *p)
 
 static int duckdb_done_func(void *)
 {
+  // Drop all server-wide shared injection tables before closing the database.
+  // Use any surviving connection if one exists; otherwise open a temporary one.
+  if (!g_shared_inj.empty())
+  {
+    std::string db_file;
+    duckdb::Connection *conn= nullptr;
+    {
+      mysql_mutex_lock(&g_duckdb_mutex);
+      if (!g_thd_conns.empty())
+      {
+        auto it= g_thd_conns.begin();
+        conn= it->second.conn;
+        db_file= it->second.db_file_path;
+      }
+      mysql_mutex_unlock(&g_duckdb_mutex);
+    }
+    duckdb::DuckDB     *tmp_db=   nullptr;
+    duckdb::Connection *tmp_conn= nullptr;
+    if (!conn && !db_file.empty())
+    {
+      try {
+        tmp_db=   new duckdb::DuckDB(db_file.c_str());
+        tmp_conn= new duckdb::Connection(*tmp_db);
+        conn= tmp_conn;
+      } catch (...) {}
+    }
+    if (conn)
+    {
+      for (auto &kv : g_shared_inj)
+        conn->Query("DROP TABLE IF EXISTS \"" + kv.second.shared_name + "\"");
+    }
+    delete tmp_conn;
+    delete tmp_db;
+    g_shared_inj.clear();
+  }
   mysql_mutex_destroy(&g_duckdb_mutex);
   return 0;
 }
@@ -3544,6 +3610,134 @@ static bool inject_table_into_duckdb(duckdb::Connection *conn,
       mysql_mutex_unlock(&g_duckdb_mutex);
     }
   }
+
+  // ---------------------------------------------------------------------------
+  // Unfiltered injections: use/create the server-wide shared table and attach
+  // a per-session TEMP VIEW so the query SQL sees the expected duck_name.
+  // ---------------------------------------------------------------------------
+  if (pred_hash.empty())
+  {
+    const std::string qual_name= std::string(t->s->db.str) + "." +
+                                 t->s->table_name.str;
+    const std::string sname= shared_inj_name(duck_name);
+
+    // Check whether a valid shared table already exists.
+    bool shared_valid= false;
+    {
+      mysql_mutex_lock(&g_duckdb_mutex);
+      auto sit= g_shared_inj.find(qual_name);
+      if (sit != g_shared_inj.end())
+      {
+        t->file->info(HA_STATUS_VARIABLE);
+        if (t->file->stats.records == sit->second.rows)
+          shared_valid= true;
+        else
+          g_shared_inj.erase(sit);  // stale — will re-inject below
+      }
+      mysql_mutex_unlock(&g_duckdb_mutex);
+    }
+
+    if (!shared_valid)
+    {
+      // Build CREATE OR REPLACE TABLE (regular, shared across connections).
+      std::ostringstream cr;
+      cr << "CREATE OR REPLACE TABLE \"" << sname << "\" (";
+      for (uint i= 0; i < t->s->fields; i++)
+      {
+        if (i > 0) cr << ", ";
+        cr << '"' << t->field[i]->field_name.str << "\" "
+           << field_type_to_duckdb(t->field[i]);
+      }
+      cr << ")";
+      auto res= conn->Query(cr.str());
+      if (res->HasError())
+      {
+        sql_print_warning("DuckDB: shared inject CREATE failed for '%s': %s",
+                          sname.c_str(),
+                          res->GetErrorObject().Message().c_str());
+        // Fall through to per-session TEMP TABLE path below.
+        goto per_session_inject;
+      }
+
+      // Fill the shared table.
+      MY_BITMAP *saved= t->read_set;
+      t->read_set= &t->s->all_set;
+      bool inj_ok= true;
+      try
+      {
+        duckdb::Appender appender(*conn, sname);
+        if (t->file->ha_rnd_init(1) != 0) { t->read_set= saved; goto per_session_inject; }
+        int rc;
+        while ((rc= t->file->ha_rnd_next(t->record[0])) == 0)
+        {
+          appender.BeginRow();
+          for (uint i= 0; i < t->s->fields; i++)
+          {
+            Field *f= t->field[i];
+            if (f->is_null()) { appender.Append<nullptr_t>(nullptr); continue; }
+            switch (f->type())
+            {
+              case MYSQL_TYPE_TINY: case MYSQL_TYPE_SHORT:
+              case MYSQL_TYPE_LONG: case MYSQL_TYPE_INT24:
+                appender.Append<int32_t>((int32_t)f->val_int()); break;
+              case MYSQL_TYPE_LONGLONG:
+                appender.Append<int64_t>(f->val_int()); break;
+              case MYSQL_TYPE_FLOAT:
+                appender.Append<float>((float)f->val_real()); break;
+              case MYSQL_TYPE_DOUBLE:
+                appender.Append<double>(f->val_real()); break;
+              default:
+              {
+                String sv;
+                f->val_str(&sv, &sv);
+                appender.Append(duckdb::Value(std::string(sv.ptr(), sv.length())));
+                break;
+              }
+            }
+          }
+          appender.EndRow();
+        }
+        t->file->ha_rnd_end();
+        appender.Close();
+      }
+      catch (const std::exception &e)
+      {
+        sql_print_warning("DuckDB: shared inject Appender failed for '%s': %s",
+                          sname.c_str(), e.what());
+        t->file->ha_rnd_end();
+        inj_ok= false;
+      }
+      t->read_set= saved;
+
+      if (!inj_ok) goto per_session_inject;
+
+      t->file->info(HA_STATUS_VARIABLE);
+      mysql_mutex_lock(&g_duckdb_mutex);
+      g_shared_inj[qual_name]= SharedInjEntry{sname, t->file->stats.records};
+      mysql_mutex_unlock(&g_duckdb_mutex);
+    }
+
+    // Attach a per-session TEMP VIEW so the query sees duck_name.
+    conn->Query("DROP VIEW IF EXISTS \"" + duck_name + "\"");
+    {
+      auto vr= conn->Query("CREATE TEMP VIEW \"" + duck_name +
+                           "\" AS SELECT * FROM \"" + sname + "\"");
+      if (!vr->HasError())
+      {
+        t->file->info(HA_STATUS_VARIABLE);
+        mysql_mutex_lock(&g_duckdb_mutex);
+        g_injected_cache[conn][duck_name]= InjCacheEntry{pred_hash, t->file->stats.records};
+        mysql_mutex_unlock(&g_duckdb_mutex);
+        return true;
+      }
+      // View creation failed — fall through to per-session TEMP TABLE.
+    }
+  }
+
+per_session_inject:
+  // ---------------------------------------------------------------------------
+  // Per-session TEMP TABLE path: filtered injections, or shared-cache fallback.
+  // ---------------------------------------------------------------------------
 
   // Drop any pre-existing TEMP TABLE for this name.  With a persistent per-THD
   // connection a previous query may have left a filtered (partial) copy; we
