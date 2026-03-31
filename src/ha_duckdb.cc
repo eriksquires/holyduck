@@ -312,14 +312,12 @@ static void registry_release(const std::string &path)
 {
   mysql_mutex_lock(&g_duckdb_mutex);
   auto it= g_duckdb_registry.find(path);
-  if (it != g_duckdb_registry.end())
-  {
-    if (--it->second.refcount == 0)
-    {
-      delete it->second.db;
-      g_duckdb_registry.erase(it);
-    }
-  }
+  if (it != g_duckdb_registry.end() && it->second.refcount > 0)
+    --it->second.refcount;
+  // Do NOT delete the DuckDB instance when refcount reaches zero.
+  // Repeated open/close cycles on the same file cause heap corruption inside
+  // DuckDB and trigger repeated macro installations. Keeping the instance alive
+  // until plugin shutdown (duckdb_done_func) avoids both problems.
   mysql_mutex_unlock(&g_duckdb_mutex);
 }
 
@@ -674,6 +672,12 @@ static int duckdb_done_func(void *)
     delete tmp_db;
     g_shared_inj.clear();
   }
+
+  // Close all DuckDB instances that were kept alive by registry_release.
+  for (auto &kv : g_duckdb_registry)
+    delete kv.second.db;
+  g_duckdb_registry.clear();
+
   mysql_mutex_destroy(&g_duckdb_mutex);
   return 0;
 }
