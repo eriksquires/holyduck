@@ -3397,9 +3397,51 @@ int ha_duckdb_select_handler::next_row()
     if (val.IsNull()) { field->set_null(); continue; }
     field->set_notnull();
 
-    // Use string conversion for all types — safe for aggregates/expressions
-    std::string s= val.ToString();
-    field->store(s.c_str(), s.length(), system_charset_info);
+    // Type-specific stores — avoids ToString() overhead for numeric/date types
+    auto type_id = result->types[i].id();
+    switch (type_id) {
+    case duckdb::LogicalTypeId::TINYINT:
+      field->store(val.GetValue<int8_t>(), false);
+      break;
+    case duckdb::LogicalTypeId::SMALLINT:
+      field->store(val.GetValue<int16_t>(), false);
+      break;
+    case duckdb::LogicalTypeId::INTEGER:
+      field->store(val.GetValue<int32_t>(), false);
+      break;
+    case duckdb::LogicalTypeId::BIGINT:
+      field->store(val.GetValue<int64_t>(), false);
+      break;
+    case duckdb::LogicalTypeId::UTINYINT:
+    case duckdb::LogicalTypeId::USMALLINT:
+    case duckdb::LogicalTypeId::UINTEGER:
+    case duckdb::LogicalTypeId::UBIGINT:
+      field->store(val.GetValue<uint64_t>(), true);
+      break;
+    case duckdb::LogicalTypeId::FLOAT:
+      field->store(val.GetValue<float>());
+      break;
+    case duckdb::LogicalTypeId::DOUBLE:
+    case duckdb::LogicalTypeId::DECIMAL:
+      field->store(val.GetValue<double>());
+      break;
+    case duckdb::LogicalTypeId::DATE: {
+      duckdb::date_t d = val.GetValue<duckdb::date_t>();
+      int32_t year, month, day;
+      duckdb::Date::Convert(d, year, month, day);
+      MYSQL_TIME mt{};
+      mt.year = year; mt.month = month; mt.day = day;
+      mt.time_type = MYSQL_TIMESTAMP_DATE;
+      field->store_time(&mt);
+      break;
+    }
+    default: {
+      // VARCHAR and other types: use string conversion
+      std::string s = val.ToString();
+      field->store(s.c_str(), s.length(), system_charset_info);
+      break;
+    }
+    }
   }
 
   current_row++;
