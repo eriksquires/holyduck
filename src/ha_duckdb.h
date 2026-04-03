@@ -28,6 +28,7 @@
 #include "my_base.h"
 #include "select_handler.h"
 #include "derived_handler.h"
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -35,7 +36,6 @@
 namespace duckdb {
     class Connection;
     class DuckDB;
-    class MaterializedQueryResult;
 }
 
 /**
@@ -64,9 +64,11 @@ class ha_duckdb: public handler
   DuckDB_share *share;
   duckdb::Connection* connection;
 
-  // Scan state
-  duckdb::MaterializedQueryResult* scan_result;
-  size_t scan_row;
+  // Scan state — streaming chunk-based iteration
+  // Stored as void* to avoid needing full duckdb.hpp in the header
+  void* scan_result;     // duckdb::QueryResult* (streaming)
+  void* scan_chunk;      // duckdb::DataChunk* (current chunk, owned)
+  size_t scan_chunk_row;
 
   // Bulk insert state — Appender kept open across write_row() calls
   // Stored as void* to avoid needing full duckdb.hpp in the header
@@ -91,8 +93,7 @@ public:
 private:
 
   DuckDB_share *get_share();
-  int convert_row_from_duckdb(uchar *buf, size_t row_idx,
-                               duckdb::MaterializedQueryResult *result);
+  int convert_row_from_duckdb(uchar *buf, size_t row_idx, void *chunk_ptr);
   std::string build_create_sql(TABLE *table_arg);
 
 public:
@@ -207,8 +208,9 @@ public:
 class ha_duckdb_select_handler : public select_handler
 {
   duckdb::Connection *connection;
-  duckdb::MaterializedQueryResult *result;
-  size_t current_row;
+  void *duck_result;    // duckdb::QueryResult* (streaming)
+  void *duck_chunk;     // duckdb::DataChunk* (current chunk, owned)
+  size_t chunk_row;
   bool use_original_sql;   // true when all leaf tables are DUCKDB engine
 
 public:
@@ -234,8 +236,9 @@ public:
 class ha_duckdb_derived_handler : public derived_handler
 {
   duckdb::Connection *connection;
-  duckdb::MaterializedQueryResult *result;
-  size_t current_row;
+  void *duck_result;    // duckdb::QueryResult* (streaming)
+  void *duck_chunk;     // duckdb::DataChunk* (current chunk, owned)
+  size_t chunk_row;
 
 public:
   ha_duckdb_derived_handler(THD *thd, TABLE_LIST *tbl, duckdb::Connection *conn);

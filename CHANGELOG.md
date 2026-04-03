@@ -1,5 +1,44 @@
 # Changelog
 
+## v0.4.1 — 2026-04-03
+
+### Highlights
+
+**Streaming query results** — all three query paths (pushed SELECT, pushed DERIVED, and fallback
+table scan) now stream results from DuckDB in ~2048-row chunks instead of materializing the
+entire result set in memory. For large CTAS operations (e.g. 60M-row lineitem at SF=10), memory
+usage plateaus at DuckDB's `memory_limit` (~4 GB) instead of growing linearly to 20+ GB and
+OOM-killing the server.
+
+### Bug Fixes
+
+- **select_handler and derived_handler streaming** — replaced `connection->Query()` (which
+  returns a `MaterializedQueryResult` holding all rows in memory) with `connection->SendQuery()`
+  (which returns a `StreamQueryResult`). Rows are now fetched on demand via `Fetch()`, one
+  `DataChunk` at a time. Previous chunks are freed before fetching the next.
+
+- **Type-specific stores in derived_handler** — `derived_handler::next_row()` now uses the same
+  type-dispatched `field->store()` calls as `select_handler::next_row()` (integer, float, date
+  types stored directly) instead of converting every value through `ToString()`.
+
+- **Missing void* casts in ha_duckdb destructor and close()** — `scan_result` and `scan_chunk`
+  are stored as `void*` but were deleted without casting, which is undefined behavior (destructor
+  not invoked). Both now use `delete static_cast<duckdb::QueryResult*>(scan_result)` and
+  `delete static_cast<duckdb::DataChunk*>(scan_chunk)`. The `close()` path also now cleans up
+  `scan_chunk`, which was previously leaked if `close()` ran without `rnd_end()`.
+
+### Release Artifacts
+
+| File | Description |
+|---|---|
+| `ha_duckdb-v0.4.1-ubuntu.so` | Ubuntu 22.04 (also covers Debian 12) |
+| `ha_duckdb-v0.4.1-oracle8.so` | Oracle Linux 8 |
+| `ha_duckdb-v0.4.1-oracle9.so` | Oracle Linux 9 |
+| `holyduck_duckdb_extensions.sql` | DuckDB macros and views |
+| `holyduck_mariadb_functions.sql` | MariaDB stored functions — install per database as needed |
+
+---
+
 ## v0.4.0 — 2026-03-27
 
 ### Highlights

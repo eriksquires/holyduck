@@ -943,13 +943,14 @@ DuckDB_share::~DuckDB_share()
 
 ha_duckdb::ha_duckdb(handlerton *hton, TABLE_SHARE *table_arg)
   :handler(hton, table_arg), share(nullptr), connection(nullptr),
-   scan_result(nullptr), scan_row(0), bulk_appender(nullptr)
+   scan_result(nullptr), scan_chunk(nullptr), scan_chunk_row(0), bulk_appender(nullptr)
 {}
 
 ha_duckdb::~ha_duckdb()
 {
   delete static_cast<duckdb::Appender*>(bulk_appender);
-  delete scan_result;
+  delete static_cast<duckdb::QueryResult*>(scan_result);
+  delete static_cast<duckdb::DataChunk*>(scan_chunk);
 }
 
 const char **ha_duckdb::bas_ext() const { return ha_duckdb_exts; }
@@ -1044,7 +1045,8 @@ int ha_duckdb::open(const char *name, int mode, uint test_if_locked)
 int ha_duckdb::close(void)
 {
   DBUG_ENTER("ha_duckdb::close");
-  delete scan_result; scan_result= nullptr;
+  delete static_cast<duckdb::DataChunk*>(scan_chunk); scan_chunk= nullptr;
+  delete static_cast<duckdb::QueryResult*>(scan_result); scan_result= nullptr;
   delete connection;  connection= nullptr;
   if (!db_file_path.empty())
     registry_release(db_file_path);
@@ -1824,7 +1826,10 @@ int ha_duckdb::rnd_init(bool scan)
   DBUG_ENTER("ha_duckdb::rnd_init");
   if (!connection) DBUG_RETURN(HA_ERR_INTERNAL_ERROR);
 
-  delete scan_result; scan_result= nullptr; scan_row= 0;
+  delete static_cast<duckdb::QueryResult*>(scan_result);
+  scan_result= nullptr;
+  delete static_cast<duckdb::DataChunk*>(scan_chunk);
+  scan_chunk= nullptr; scan_chunk_row= 0;
   scan_field_map.clear();
 
   try
@@ -1862,14 +1867,14 @@ int ha_duckdb::rnd_init(bool scan)
     }
 
     register_active_connection(ha_thd(), connection);
-    auto r= connection->Query(sql);
+    auto r= connection->SendQuery(sql);
     unregister_active_connection(ha_thd());
     if (r->HasError())
     {
       sql_print_error("DuckDB: rnd_init failed: %s", r->GetErrorObject().Message().c_str());
       DBUG_RETURN(HA_ERR_INTERNAL_ERROR);
     }
-    scan_result= r.release();
+    scan_result= static_cast<void*>(r.release());
   }
   catch (const std::exception &e)
   {
@@ -1883,12 +1888,13 @@ int ha_duckdb::rnd_init(bool scan)
 int ha_duckdb::rnd_end()
 {
   DBUG_ENTER("ha_duckdb::rnd_end");
-  delete scan_result; scan_result= nullptr;
+  delete static_cast<duckdb::DataChunk*>(scan_chunk); scan_chunk= nullptr;
+  delete static_cast<duckdb::QueryResult*>(scan_result); scan_result= nullptr;
   DBUG_RETURN(0);
 }
 
 int ha_duckdb::convert_row_from_duckdb(uchar *buf, size_t row_idx,
-                                        duckdb::MaterializedQueryResult *result)
+                                        void *chunk_ptr)
 {
   memset(buf, 0, table->s->null_bytes);
 
@@ -1901,7 +1907,8 @@ int ha_duckdb::convert_row_from_duckdb(uchar *buf, size_t row_idx,
   {
     uint fi= scan_field_map.empty() ? j : scan_field_map[j];
     Field *field= table->field[fi];
-    duckdb::Value val= result->GetValue(j, row_idx);
+    auto *ck = static_cast<duckdb::DataChunk*>(chunk_ptr);
+    duckdb::Value val= ck->GetValue(j, row_idx);
 
     if (val.IsNull()) { field->set_null(); continue; }
     field->set_notnull();
@@ -1932,9 +1939,31 @@ int ha_duckdb::convert_row_from_duckdb(uchar *buf, size_t row_idx,
 int ha_duckdb::rnd_next(uchar *buf)
 {
   DBUG_ENTER("ha_duckdb::rnd_next");
-  if (!scan_result || scan_row >= scan_result->RowCount())
+  if (!scan_result)
     DBUG_RETURN(HA_ERR_END_OF_FILE);
-  convert_row_from_duckdb(buf, scan_row++, scan_result);
+
+  auto *qr = static_cast<duckdb::QueryResult*>(scan_result);
+  auto *ck = static_cast<duckdb::DataChunk*>(scan_chunk);
+
+  while (!ck || scan_chunk_row >= ck->size())
+  {
+    try {
+      delete ck;
+      auto fetched = qr->Fetch();
+      ck = fetched.release();
+      scan_chunk = ck;
+    } catch (...) {
+      scan_chunk = nullptr;
+      DBUG_RETURN(HA_ERR_END_OF_FILE);
+    }
+    if (!ck || ck->size() == 0) {
+      scan_chunk = nullptr;
+      DBUG_RETURN(HA_ERR_END_OF_FILE);
+    }
+    scan_chunk_row = 0;
+  }
+
+  convert_row_from_duckdb(buf, scan_chunk_row++, scan_chunk);
   DBUG_RETURN(0);
 }
 
@@ -3046,7 +3075,7 @@ ha_duckdb_select_handler::ha_duckdb_select_handler(THD *thd, SELECT_LEX *sel,
                                                    duckdb::Connection *conn,
                                                    bool use_orig)
   : select_handler(thd, duckdb_hton, sel),
-    connection(conn), result(nullptr), current_row(0),
+    connection(conn), duck_result(nullptr), duck_chunk(nullptr), chunk_row(0),
     use_original_sql(use_orig)
 {}
 
@@ -3055,13 +3084,14 @@ ha_duckdb_select_handler::ha_duckdb_select_handler(THD *thd,
                                                    duckdb::Connection *conn,
                                                    bool use_orig)
   : select_handler(thd, duckdb_hton, unit),
-    connection(conn), result(nullptr), current_row(0),
+    connection(conn), duck_result(nullptr), duck_chunk(nullptr), chunk_row(0),
     use_original_sql(use_orig)
 {}
 
 ha_duckdb_select_handler::~ha_duckdb_select_handler()
 {
-  delete result;
+  delete static_cast<duckdb::DataChunk*>(duck_chunk);
+  delete static_cast<duckdb::QueryResult*>(duck_result);
   // connection is owned by g_thd_conns (per-THD persistent connection).
   // It is deleted in duckdb_close_connection when the session ends.
   // Exception: the unit handler (UNION path) still creates its own private
@@ -3317,11 +3347,11 @@ int ha_duckdb_select_handler::init_scan()
   // Retry loop: handles tables not visible in leaf_tables (e.g. subquery aliases).
   for (int attempt= 0; attempt < 8; attempt++)
   {
-    std::unique_ptr<duckdb::MaterializedQueryResult> r;
+    std::unique_ptr<duckdb::QueryResult> r;
     try
     {
       register_active_connection(thd, connection);
-      r= connection->Query(sql);
+      r= connection->SendQuery(sql);
       unregister_active_connection(thd);
     }
     catch (const std::exception &e)
@@ -3333,8 +3363,10 @@ int ha_duckdb_select_handler::init_scan()
 
     if (!r->HasError())
     {
-      result= r.release();
-      current_row= 0;
+      delete static_cast<duckdb::DataChunk*>(duck_chunk);
+      duck_chunk= nullptr;
+      duck_result= static_cast<void*>(r.release());
+      chunk_row= 0;
       return 0;
     }
 
@@ -3383,22 +3415,44 @@ int ha_duckdb_select_handler::init_scan()
 
 int ha_duckdb_select_handler::next_row()
 {
-  if (!result || current_row >= result->RowCount())
+  if (!duck_result)
     return HA_ERR_END_OF_FILE;
+
+  auto *qr = static_cast<duckdb::QueryResult*>(duck_result);
+  auto *ck = static_cast<duckdb::DataChunk*>(duck_chunk);
+
+  // Fetch next chunk if needed
+  while (!ck || chunk_row >= ck->size())
+  {
+    try {
+      delete ck;
+      auto fetched = qr->Fetch();
+      ck = fetched.release();
+      duck_chunk = ck;
+    } catch (...) {
+      duck_chunk = nullptr;
+      return HA_ERR_END_OF_FILE;
+    }
+    if (!ck || ck->size() == 0) {
+      duck_chunk = nullptr;
+      return HA_ERR_END_OF_FILE;
+    }
+    chunk_row = 0;
+  }
 
   // Fill table->record[0] — one field per SELECT output column
   memset(table->record[0], 0, table->s->null_bytes);
 
-  for (uint i= 0; i < table->s->fields && i < result->ColumnCount(); i++)
+  for (uint i= 0; i < table->s->fields && i < ck->ColumnCount(); i++)
   {
     Field *field= table->field[i];
-    duckdb::Value val= result->GetValue(i, current_row);
+    duckdb::Value val= ck->GetValue(i, chunk_row);
 
     if (val.IsNull()) { field->set_null(); continue; }
     field->set_notnull();
 
     // Type-specific stores — avoids ToString() overhead for numeric/date types
-    auto type_id = result->types[i].id();
+    auto type_id = qr->types[i].id();
     switch (type_id) {
     case duckdb::LogicalTypeId::TINYINT:
       field->store(val.GetValue<int8_t>(), false);
@@ -3444,14 +3498,16 @@ int ha_duckdb_select_handler::next_row()
     }
   }
 
-  current_row++;
+  chunk_row++;
   return 0;
 }
 
 int ha_duckdb_select_handler::end_scan()
 {
-  delete result;
-  result= nullptr;
+  delete static_cast<duckdb::DataChunk*>(duck_chunk);
+  duck_chunk= nullptr;
+  delete static_cast<duckdb::QueryResult*>(duck_result);
+  duck_result= nullptr;
   return 0;
 }
 
@@ -4004,14 +4060,15 @@ create_duckdb_derived_handler(THD *thd, TABLE_LIST *derived)
 ha_duckdb_derived_handler::ha_duckdb_derived_handler(THD *thd, TABLE_LIST *tbl,
                                                      duckdb::Connection *conn)
   : derived_handler(thd, duckdb_hton),
-    connection(conn), result(nullptr), current_row(0)
+    connection(conn), duck_result(nullptr), duck_chunk(nullptr), chunk_row(0)
 {
   derived= tbl;
 }
 
 ha_duckdb_derived_handler::~ha_duckdb_derived_handler()
 {
-  delete result;
+  delete static_cast<duckdb::DataChunk*>(duck_chunk);
+  delete static_cast<duckdb::QueryResult*>(duck_result);
   delete connection;
 }
 
@@ -4069,11 +4126,11 @@ int ha_duckdb_derived_handler::init_scan()
   // via a subquery alias not in leaf_tables), inject it and retry.
   for (int attempt = 0; attempt < 8; attempt++)
   {
-    std::unique_ptr<duckdb::MaterializedQueryResult> r;
+    std::unique_ptr<duckdb::QueryResult> r;
     try
     {
       register_active_connection(thd, connection);
-      r= connection->Query(sql);
+      r= connection->SendQuery(sql);
       unregister_active_connection(thd);
     }
     catch (const std::exception &e)
@@ -4085,8 +4142,10 @@ int ha_duckdb_derived_handler::init_scan()
 
     if (!r->HasError())
     {
-      result= r.release();
-      current_row= 0;
+      delete static_cast<duckdb::DataChunk*>(duck_chunk);
+      duck_chunk= nullptr;
+      duck_result= static_cast<void*>(r.release());
+      chunk_row= 0;
       return 0;
     }
 
@@ -4143,28 +4202,95 @@ int ha_duckdb_derived_handler::init_scan()
 
 int ha_duckdb_derived_handler::next_row()
 {
-  if (!result || current_row >= result->RowCount())
+  if (!duck_result)
     return HA_ERR_END_OF_FILE;
+
+  auto *qr = static_cast<duckdb::QueryResult*>(duck_result);
+  auto *ck = static_cast<duckdb::DataChunk*>(duck_chunk);
+
+  while (!ck || chunk_row >= ck->size())
+  {
+    try {
+      delete ck;
+      auto fetched = qr->Fetch();
+      ck = fetched.release();
+      duck_chunk = ck;
+    } catch (...) {
+      duck_chunk = nullptr;
+      return HA_ERR_END_OF_FILE;
+    }
+    if (!ck || ck->size() == 0) {
+      duck_chunk = nullptr;
+      return HA_ERR_END_OF_FILE;
+    }
+    chunk_row = 0;
+  }
 
   memset(table->record[0], 0, table->s->null_bytes);
 
-  for (uint i= 0; i < table->s->fields && i < result->ColumnCount(); i++)
+  for (uint i= 0; i < table->s->fields && i < ck->ColumnCount(); i++)
   {
     Field *field= table->field[i];
-    duckdb::Value val= result->GetValue(i, current_row);
+    duckdb::Value val= ck->GetValue(i, chunk_row);
     if (val.IsNull()) { field->set_null(); continue; }
     field->set_notnull();
-    std::string s= val.ToString();
-    field->store(s.c_str(), s.length(), system_charset_info);
+
+    // Type-specific stores — avoids ToString() overhead for numeric/date types
+    auto type_id = qr->types[i].id();
+    switch (type_id) {
+    case duckdb::LogicalTypeId::TINYINT:
+      field->store(val.GetValue<int8_t>(), false);
+      break;
+    case duckdb::LogicalTypeId::SMALLINT:
+      field->store(val.GetValue<int16_t>(), false);
+      break;
+    case duckdb::LogicalTypeId::INTEGER:
+      field->store(val.GetValue<int32_t>(), false);
+      break;
+    case duckdb::LogicalTypeId::BIGINT:
+      field->store(val.GetValue<int64_t>(), false);
+      break;
+    case duckdb::LogicalTypeId::UTINYINT:
+    case duckdb::LogicalTypeId::USMALLINT:
+    case duckdb::LogicalTypeId::UINTEGER:
+    case duckdb::LogicalTypeId::UBIGINT:
+      field->store(val.GetValue<uint64_t>(), true);
+      break;
+    case duckdb::LogicalTypeId::FLOAT:
+      field->store(val.GetValue<float>());
+      break;
+    case duckdb::LogicalTypeId::DOUBLE:
+    case duckdb::LogicalTypeId::DECIMAL:
+      field->store(val.GetValue<double>());
+      break;
+    case duckdb::LogicalTypeId::DATE: {
+      duckdb::date_t d = val.GetValue<duckdb::date_t>();
+      int32_t year, month, day;
+      duckdb::Date::Convert(d, year, month, day);
+      MYSQL_TIME mt{};
+      mt.year = year; mt.month = month; mt.day = day;
+      mt.time_type = MYSQL_TIMESTAMP_DATE;
+      field->store_time(&mt);
+      break;
+    }
+    default: {
+      // VARCHAR and other types: use string conversion
+      std::string s = val.ToString();
+      field->store(s.c_str(), s.length(), system_charset_info);
+      break;
+    }
+    }
   }
-  current_row++;
+  chunk_row++;
   return 0;
 }
 
 int ha_duckdb_derived_handler::end_scan()
 {
-  delete result;
-  result= nullptr;
+  delete static_cast<duckdb::DataChunk*>(duck_chunk);
+  duck_chunk= nullptr;
+  delete static_cast<duckdb::QueryResult*>(duck_result);
+  duck_result= nullptr;
   return 0;
 }
 
