@@ -49,8 +49,8 @@ RUN mysql_install_db --user=mysql --datadir=/var/lib/mysql
 # Create run directory for mysqld
 RUN mkdir -p /run/mysqld && chown mysql:mysql /run/mysqld
 
-# Configure MariaDB
-RUN printf '[mysqld]\nbind-address = 0.0.0.0\nport = 3306\ninnodb_buffer_pool_size = 512M\nmax_connections = 100\ntmpdir = /var/tmp/mariadb\n' > /etc/my.cnf
+# Configure MariaDB — must go in mariadb.conf.d so Ubuntu's MariaDB reads it
+RUN printf '[mysqld]\nbind-address = 0.0.0.0\nport = 3306\ninnodb_buffer_pool_size = 512M\nmax_connections = 100\ntmpdir = /var/tmp/mariadb\n' > /etc/mysql/mariadb.conf.d/99-holyduck.cnf
 
 # Install DuckDB CLI
 RUN curl https://install.duckdb.org | sh \

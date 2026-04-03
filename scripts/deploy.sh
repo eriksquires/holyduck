@@ -22,10 +22,27 @@ ok()   { echo -e "${GREEN}  ✓${NC} $*"; }
 info() { echo -e "${YELLOW}  →${NC} $*"; }
 die()  { echo -e "${RED}  ✗${NC} $*" >&2; exit 1; }
 
-# ── 1. Check container is running ────────────────────────────────────────────
+# ── 1. Ensure container is running ───────────────────────────────────────────
 info "Checking container '${CONTAINER}'..."
-docker inspect --format '{{.State.Running}}' "${CONTAINER}" 2>/dev/null \
-    | grep -q true || die "Container '${CONTAINER}' is not running. Start it first."
+if ! docker inspect --format '{{.State.Running}}' "${CONTAINER}" 2>/dev/null | grep -q true; then
+  # Container exists but is stopped — stop any other dev container and start this one
+  if docker ps -a --format '{{.Names}}' | grep -q "^${CONTAINER}$"; then
+    for running in $(docker ps --format '{{.Names}}' | grep '^duckdb-plugin-dev-' | grep -v "^${CONTAINER}$"); do
+      info "Stopping ${running} to free port 3306..."
+      docker stop "${running}" > /dev/null
+    done
+    info "Starting ${CONTAINER}..."
+    docker start "${CONTAINER}" > /dev/null
+    # Wait for MariaDB to be ready
+    for i in $(seq 1 30); do
+      docker exec "${CONTAINER}" mysqladmin ${MARIADB_OPTS} ping --silent 2>/dev/null && break
+      sleep 1
+      [[ $i -lt 30 ]] || die "MariaDB did not start within 30 seconds."
+    done
+  else
+    die "Container '${CONTAINER}' does not exist. Create it with docker-run.sh first."
+  fi
+fi
 ok "Container is running."
 
 # ── 2. Detect distro-specific settings from the container ─────────────────────

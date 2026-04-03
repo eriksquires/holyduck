@@ -795,10 +795,18 @@ static bool duckdb_show_status(handlerton *hton, THD *thd,
 
   std::string db_file= std::string(mysql_real_data_home) + "#duckdb/global.duckdb";
 
+  // HolyDuck version and build timestamp
+  {
+    std::string ver= HOLYDUCK_VERSION;
+    stat_print(thd, "DuckDB", 6, "HolyDuck version", 16, ver.c_str(), ver.length());
+    std::string built= std::string(__DATE__) + " " + __TIME__;
+    stat_print(thd, "DuckDB", 6, "HolyDuck built", 14, built.c_str(), built.length());
+  }
+
   // DuckDB version
   {
     std::string ver= duckdb::DuckDB::LibraryVersion();
-    stat_print(thd, "DuckDB", 6, "Version", 7, ver.c_str(), ver.length());
+    stat_print(thd, "DuckDB", 6, "DuckDB version", 14, ver.c_str(), ver.length());
   }
 
   // Data file path
