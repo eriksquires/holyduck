@@ -12,10 +12,10 @@
 set -euo pipefail
 
 SF=10
-CONTAINER="${1:-duckdb-plugin-dev-ubuntu}"
+CONTAINER="${1:-holyduck-dev-ubuntu}"
 DUCKDB_FILE="/var/lib/mysql/#duckdb/global.duckdb"
 PERF_FILE="/home/shared/duckdb/tpch_perf.duckdb"
-MARIADB="docker exec -i ${CONTAINER} mariadb -uroot -ptestpass --ssl=0"
+MARIADB="docker exec -i ${CONTAINER} mariadb -uroot --ssl=0"
 
 GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
 step() { echo -e "${YELLOW}──${NC} $*"; }

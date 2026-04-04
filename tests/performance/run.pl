@@ -13,16 +13,14 @@
 #   perl run.pl [options]
 #
 # Options:
-#   --host    HOST     MariaDB host (default: 127.0.0.1)
-#   --port    PORT     MariaDB port (default: 3306)
+#   --host    HOST     MariaDB host (default: from projects.yaml)
+#   --port    PORT     MariaDB port (default: from projects.yaml)
 #   --user    USER     MariaDB user (default: root)
-#   --pass    PASS     MariaDB password (default: testpass)
+#   --pass    PASS     MariaDB password (default: empty)
 #   --mode    MODE     standalone|sm|mm|all  (default: all)
 #   --timeout N        seconds per query (default: 300)
 #   --runs    N        timed runs after warmup (default: 3)
 #   --output  FORMAT   markdown|csv  (default: markdown)
-#   --container NAME   Docker container for standalone DuckDB CLI
-#                      (default: duckdb-plugin-dev-ubuntu)
 #
 # Prerequisite: run setup.sql first.
 
@@ -34,6 +32,9 @@ use File::Basename qw(dirname);
 use Cwd qw(abs_path);
 use DBI;
 
+use lib '/home/shared/mariadb/lib';
+use MariaDB::Dev::Project qw(project_config);
+
 # ---------------------------------------------------------------------------
 # Config / options
 # ---------------------------------------------------------------------------
@@ -42,10 +43,12 @@ my $PLUGIN_DIR  = abs_path(dirname(__FILE__) . "/../..");
 my $QUERY_DIR   = "$PLUGIN_DIR/tests/regression/tpch";
 my $DUCKDB_FILE = "/home/shared/duckdb/tpch_perf.duckdb";
 
-my $host        = "127.0.0.1";
-my $port        = 3306;
+my %cfg = project_config('holyduck');
+
+my $host        = $cfg{db_host};
+my $port        = $cfg{db_port};
 my $user        = "root";
-my $pass        = "testpass";
+my $pass        = "";
 my $mode        = "all";
 my $timeout     = 300;
 my $runs        = 3;

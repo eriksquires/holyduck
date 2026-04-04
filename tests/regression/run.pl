@@ -1,9 +1,11 @@
 #!/usr/bin/env perl
 # HolyDuck regression test runner.
-# Usage: perl run.pl [--update] [--host HOST] [--port PORT]
+# Usage: perl run.pl [--update] [--host=HOST] [--port=PORT]
 #
 # Runs all *.sql tests in this directory and the tpch/ subdirectory.
 # Each test resets the database to a clean state via setup.sql before running.
+#
+# Host and port default to the holyduck project config from projects.yaml.
 
 use strict;
 use warnings;
@@ -12,10 +14,15 @@ use Try::Tiny;
 use File::Basename qw(dirname basename);
 use Cwd            qw(abs_path);
 
+use lib '/home/shared/mariadb/lib';
+use MariaDB::Dev::Project qw(project_config);
+
+my %cfg = project_config('holyduck');
+
 my $DIR    = abs_path(dirname(abs_path($0)));
 my $UPDATE = 0;
-my $HOST   = '127.0.0.1';
-my $PORT   = 3306;
+my $HOST   = $cfg{db_host};
+my $PORT   = $cfg{db_port};
 
 for my $arg (@ARGV) {
     $UPDATE = 1    if $arg eq '--update';
