@@ -20,6 +20,9 @@ my_config.h
 CMakeCache.txt
 CMakeFiles/
 
+# Archived scripts (superseded by shared lib)
+scripts/archive/
+
 # Compiled objects
 *.o
 *.so
