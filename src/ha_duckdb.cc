@@ -556,6 +556,36 @@ static MYSQL_SYSVAR_STR(
   NULL, duckdb_execute_sql_update,
   NULL);
 
+// Read-only build info sysvars — matches IntensityDB pattern so automation
+// scripts can validate both engines with identical logic.
+static char *duckdb_build_timestamp_var= (char *)(__DATE__ " " __TIME__);
+static char *duckdb_build_flags_var= (char *)"";
+static char *duckdb_holyduck_version_var= (char *)HOLYDUCK_VERSION;
+
+static MYSQL_SYSVAR_STR(
+  build_timestamp,
+  duckdb_build_timestamp_var,
+  PLUGIN_VAR_READONLY | PLUGIN_VAR_NOCMDOPT,
+  "Compile timestamp of the HolyDuck plugin",
+  NULL, NULL,
+  __DATE__ " " __TIME__);
+
+static MYSQL_SYSVAR_STR(
+  build_flags,
+  duckdb_build_flags_var,
+  PLUGIN_VAR_READONLY | PLUGIN_VAR_NOCMDOPT,
+  "Compile-time feature flags",
+  NULL, NULL,
+  "");
+
+static MYSQL_SYSVAR_STR(
+  holyduck_version,
+  duckdb_holyduck_version_var,
+  PLUGIN_VAR_READONLY | PLUGIN_VAR_NOCMDOPT,
+  "HolyDuck version string",
+  NULL, NULL,
+  HOLYDUCK_VERSION);
+
 static struct st_mysql_sys_var *duckdb_system_variables[]=
 {
   MYSQL_SYSVAR(max_threads),
@@ -564,6 +594,9 @@ static struct st_mysql_sys_var *duckdb_system_variables[]=
   MYSQL_SYSVAR(execute_sql),
   MYSQL_SYSVAR(last_result),
   MYSQL_SYSVAR(flush_cache),
+  MYSQL_SYSVAR(build_timestamp),
+  MYSQL_SYSVAR(build_flags),
+  MYSQL_SYSVAR(holyduck_version),
   NULL
 };
 
