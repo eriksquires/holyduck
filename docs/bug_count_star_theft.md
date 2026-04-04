@@ -57,9 +57,113 @@ if (!has_duckdb_table) return nullptr;
 So it's not just stealing the query — it copies the entire table into DuckDB's
 memory first. For 60M rows this takes ~30s and consumes significant memory.
 
+## How to test
+
+```sql
+-- This table is ENGINE=IntensityDB, NOT DuckDB.
+-- 60M rows, 8.2 GB on disk.
+EXPLAIN SELECT COUNT(*) FROM tpch_idb_sf10.lineitem;
+```
+
+**Current (broken):** Shows `PUSHED SELECT`, takes ~30s.
+
+**Expected (fixed):** Should NOT show `PUSHED SELECT`. MariaDB should use
+IntensityDB's `records()` method, which returns instantly by summing page
+header nrows values.
+
+### Verification after fix
+
+```sql
+-- Should NOT be PUSHED SELECT
+EXPLAIN SELECT COUNT(*) FROM tpch_idb_sf10.lineitem;
+-- Expected: simple SELECT with no pushdown (uses HA_HAS_RECORDS → records())
+
+-- Should complete in < 1 second
+SELECT COUNT(*) FROM tpch_idb_sf10.lineitem;
+-- Expected: 59986052
+
+-- DuckDB queries should still be pushed (this must NOT break)
+EXPLAIN SELECT COUNT(*) FROM tpch_sm.lineitem;
+-- Expected: PUSHED SELECT (correct — tpch_sm is a DuckDB table)
+
+-- Mixed-engine queries should not be pushed to DuckDB
+EXPLAIN SELECT COUNT(*) FROM tpch_idb_sf10.lineitem l
+  JOIN tpch_sm.orders o ON l.l_orderkey = o.o_orderkey;
+-- Expected: NOT pushed (mixed engines)
+```
+
+### GDB verification
+
+Breakpoint on `create_duckdb_select_handler` should NOT fire for queries
+where all leaf tables are non-DuckDB:
+
+```
+gdb -batch -p <pid> \
+  -ex "break create_duckdb_select_handler" \
+  -ex "commands 1" -ex "bt 3" -ex "continue" -ex "end" \
+  -ex "continue"
+```
+
+Then run: `SELECT COUNT(*) FROM tpch_idb_sf10.lineitem`
+
+If the breakpoint fires and returns non-null, the bug is still present.
+
 ## Impact
 
 - `SELECT COUNT(*)` on IntensityDB tables: 30s → should be <1s via `records()`
 - Any pushed SELECT on non-DuckDB tables triggers a full table copy into DuckDB
 - Memory: DuckDB materializes the full table as a temp table
 - This affects ALL queries on non-DuckDB tables that DuckDB's handler claims
+
+---
+
+## Update: 2026-04-04 — DuckDB is not the thief
+
+### GDB findings
+
+A HolyDuck fix was applied to guard `create_duckdb_select_handler()` against
+claiming queries with no DuckDB leaf tables (commit af4b595). However, EXPLAIN
+still showed `PUSHED SELECT` for `SELECT COUNT(*) FROM tpch_idb_sf10.lineitem`.
+
+GDB breakpoints on all three DuckDB handler factories (`create_duckdb_select_handler`,
+`create_duckdb_unit_handler`, `create_duckdb_derived_handler`) were **never hit**
+for this query. Yet the EXPLAIN showed `PUSHED SELECT`.
+
+Breaking on `create_intensity_select_handler` instead:
+
+```
+Thread 38 "one_connection" hit Breakpoint 1, create_intensity_select_handler
+  at ha_intensitydb.cc:1226
+#1  find_select_handler_inner at sql_select.cc:5219
+```
+
+**IntensityDB's own select handler is claiming the query**, not DuckDB.
+
+### What this means
+
+1. The original bug analysis was wrong — DuckDB was never the thief for this
+   query. MariaDB calls `create_select` on each engine in turn; IntensityDB
+   gets asked first (it owns the table) and is returning a handler instead of
+   nullptr.
+
+2. The bug doc's GDB trace (showing IntensityDB returning nullptr for
+   `only_count_star=true`) may reflect an older version of IntensityDB that
+   correctly declined. The current version at `ha_intensitydb.cc:1226` does
+   not decline — it claims the query and runs a full scan through DuckDB's
+   materialized path.
+
+3. The HolyDuck fix (guarding the subquery fallback) is still correct and
+   useful — it prevents DuckDB from claiming pure non-DuckDB queries when
+   `query_tables` happens to contain DuckDB tables from unrelated parts of
+   the query tree. But it's not the fix for this specific bug.
+
+### Actual fix needed
+
+The fix belongs in **IntensityDB**, not HolyDuck:
+
+- `create_intensity_select_handler()` at `ha_intensitydb.cc:1226` should
+  detect bare `COUNT(*)` queries (no GROUP BY, no WHERE, single table) and
+  return nullptr so MariaDB uses `records()` instead.
+
+- The `only_count_star` detection logic referenced in the original bug doc
+  either never landed, was reverted, or has a bug in its condition.

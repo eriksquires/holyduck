@@ -1911,14 +1911,15 @@ int ha_duckdb::convert_row_from_duckdb(uchar *buf, size_t row_idx,
   // Otherwise fall back to sequential 1:1 mapping.
   uint ncols= scan_field_map.empty() ? table->s->fields
                                      : (uint)scan_field_map.size();
+  auto *ck = static_cast<duckdb::DataChunk*>(chunk_ptr);
   for (uint j= 0; j < ncols; j++)
   {
     uint fi= scan_field_map.empty() ? j : scan_field_map[j];
     Field *field= table->field[fi];
-    auto *ck = static_cast<duckdb::DataChunk*>(chunk_ptr);
-    duckdb::Value val= ck->GetValue(j, row_idx);
 
-    if (val.IsNull()) { field->set_null(); continue; }
+    auto &vec = ck->data[j];
+    auto &validity = duckdb::FlatVector::Validity(vec);
+    if (!validity.RowIsValid(row_idx)) { field->set_null(); continue; }
     field->set_notnull();
 
     switch (field->type())
@@ -1927,14 +1928,24 @@ int ha_duckdb::convert_row_from_duckdb(uchar *buf, size_t row_idx,
       case MYSQL_TYPE_SHORT:
       case MYSQL_TYPE_LONG:
       case MYSQL_TYPE_INT24:
-        field->store(val.GetValue<int32_t>(), false); break;
+        field->store(duckdb::FlatVector::GetData<int32_t>(vec)[row_idx], false); break;
       case MYSQL_TYPE_LONGLONG:
-        field->store(val.GetValue<int64_t>(), false); break;
+        field->store(duckdb::FlatVector::GetData<int64_t>(vec)[row_idx], false); break;
       case MYSQL_TYPE_FLOAT:
       case MYSQL_TYPE_DOUBLE:
-        field->store(val.GetValue<double>()); break;
+        field->store(duckdb::FlatVector::GetData<double>(vec)[row_idx]); break;
+      case MYSQL_TYPE_VARCHAR:
+      case MYSQL_TYPE_VAR_STRING:
+      case MYSQL_TYPE_STRING:
+      case MYSQL_TYPE_BLOB:
+      {
+        auto str = duckdb::FlatVector::GetData<duckdb::string_t>(vec)[row_idx];
+        field->store(str.GetData(), str.GetSize(), system_charset_info);
+        break;
+      }
       default:
       {
+        duckdb::Value val= ck->GetValue(j, row_idx);
         std::string s= val.ToString();
         field->store(s.c_str(), s.length(), system_charset_info);
         break;
@@ -1968,6 +1979,7 @@ int ha_duckdb::rnd_next(uchar *buf)
       scan_chunk = nullptr;
       DBUG_RETURN(HA_ERR_END_OF_FILE);
     }
+    ck->Flatten();
     scan_chunk_row = 0;
   }
 
@@ -3471,6 +3483,7 @@ int ha_duckdb_select_handler::next_row()
       duck_chunk = nullptr;
       return HA_ERR_END_OF_FILE;
     }
+    ck->Flatten();
     chunk_row = 0;
   }
 
@@ -3480,41 +3493,47 @@ int ha_duckdb_select_handler::next_row()
   for (uint i= 0; i < table->s->fields && i < ck->ColumnCount(); i++)
   {
     Field *field= table->field[i];
-    duckdb::Value val= ck->GetValue(i, chunk_row);
 
-    if (val.IsNull()) { field->set_null(); continue; }
+    // Null check via validity mask — avoids constructing a Value object
+    auto &vec = ck->data[i];
+    auto &validity = duckdb::FlatVector::Validity(vec);
+    if (!validity.RowIsValid(chunk_row)) { field->set_null(); continue; }
     field->set_notnull();
 
     // Type-specific stores — avoids ToString() overhead for numeric/date types
     auto type_id = qr->types[i].id();
     switch (type_id) {
     case duckdb::LogicalTypeId::TINYINT:
-      field->store(val.GetValue<int8_t>(), false);
+      field->store(duckdb::FlatVector::GetData<int8_t>(vec)[chunk_row], false);
       break;
     case duckdb::LogicalTypeId::SMALLINT:
-      field->store(val.GetValue<int16_t>(), false);
+      field->store(duckdb::FlatVector::GetData<int16_t>(vec)[chunk_row], false);
       break;
     case duckdb::LogicalTypeId::INTEGER:
-      field->store(val.GetValue<int32_t>(), false);
+      field->store(duckdb::FlatVector::GetData<int32_t>(vec)[chunk_row], false);
       break;
     case duckdb::LogicalTypeId::BIGINT:
-      field->store(val.GetValue<int64_t>(), false);
+      field->store(duckdb::FlatVector::GetData<int64_t>(vec)[chunk_row], false);
       break;
     case duckdb::LogicalTypeId::UTINYINT:
     case duckdb::LogicalTypeId::USMALLINT:
     case duckdb::LogicalTypeId::UINTEGER:
-    case duckdb::LogicalTypeId::UBIGINT:
+    case duckdb::LogicalTypeId::UBIGINT: {
+      duckdb::Value val = ck->GetValue(i, chunk_row);
       field->store(val.GetValue<uint64_t>(), true);
       break;
+    }
     case duckdb::LogicalTypeId::FLOAT:
-      field->store(val.GetValue<float>());
+      field->store(duckdb::FlatVector::GetData<float>(vec)[chunk_row]);
       break;
     case duckdb::LogicalTypeId::DOUBLE:
-    case duckdb::LogicalTypeId::DECIMAL:
+    case duckdb::LogicalTypeId::DECIMAL: {
+      duckdb::Value val = ck->GetValue(i, chunk_row);
       field->store(val.GetValue<double>());
       break;
+    }
     case duckdb::LogicalTypeId::DATE: {
-      duckdb::date_t d = val.GetValue<duckdb::date_t>();
+      auto d = duckdb::FlatVector::GetData<duckdb::date_t>(vec)[chunk_row];
       int32_t year, month, day;
       duckdb::Date::Convert(d, year, month, day);
       MYSQL_TIME mt{};
@@ -3523,8 +3542,13 @@ int ha_duckdb_select_handler::next_row()
       field->store_time(&mt);
       break;
     }
+    case duckdb::LogicalTypeId::VARCHAR: {
+      auto str = duckdb::FlatVector::GetData<duckdb::string_t>(vec)[chunk_row];
+      field->store(str.GetData(), str.GetSize(), system_charset_info);
+      break;
+    }
     default: {
-      // VARCHAR and other types: use string conversion
+      duckdb::Value val = ck->GetValue(i, chunk_row);
       std::string s = val.ToString();
       field->store(s.c_str(), s.length(), system_charset_info);
       break;
@@ -4257,6 +4281,7 @@ int ha_duckdb_derived_handler::next_row()
       duck_chunk = nullptr;
       return HA_ERR_END_OF_FILE;
     }
+    ck->Flatten();
     chunk_row = 0;
   }
 
@@ -4265,40 +4290,45 @@ int ha_duckdb_derived_handler::next_row()
   for (uint i= 0; i < table->s->fields && i < ck->ColumnCount(); i++)
   {
     Field *field= table->field[i];
-    duckdb::Value val= ck->GetValue(i, chunk_row);
-    if (val.IsNull()) { field->set_null(); continue; }
+
+    auto &vec = ck->data[i];
+    auto &validity = duckdb::FlatVector::Validity(vec);
+    if (!validity.RowIsValid(chunk_row)) { field->set_null(); continue; }
     field->set_notnull();
 
-    // Type-specific stores — avoids ToString() overhead for numeric/date types
     auto type_id = qr->types[i].id();
     switch (type_id) {
     case duckdb::LogicalTypeId::TINYINT:
-      field->store(val.GetValue<int8_t>(), false);
+      field->store(duckdb::FlatVector::GetData<int8_t>(vec)[chunk_row], false);
       break;
     case duckdb::LogicalTypeId::SMALLINT:
-      field->store(val.GetValue<int16_t>(), false);
+      field->store(duckdb::FlatVector::GetData<int16_t>(vec)[chunk_row], false);
       break;
     case duckdb::LogicalTypeId::INTEGER:
-      field->store(val.GetValue<int32_t>(), false);
+      field->store(duckdb::FlatVector::GetData<int32_t>(vec)[chunk_row], false);
       break;
     case duckdb::LogicalTypeId::BIGINT:
-      field->store(val.GetValue<int64_t>(), false);
+      field->store(duckdb::FlatVector::GetData<int64_t>(vec)[chunk_row], false);
       break;
     case duckdb::LogicalTypeId::UTINYINT:
     case duckdb::LogicalTypeId::USMALLINT:
     case duckdb::LogicalTypeId::UINTEGER:
-    case duckdb::LogicalTypeId::UBIGINT:
+    case duckdb::LogicalTypeId::UBIGINT: {
+      duckdb::Value val = ck->GetValue(i, chunk_row);
       field->store(val.GetValue<uint64_t>(), true);
       break;
+    }
     case duckdb::LogicalTypeId::FLOAT:
-      field->store(val.GetValue<float>());
+      field->store(duckdb::FlatVector::GetData<float>(vec)[chunk_row]);
       break;
     case duckdb::LogicalTypeId::DOUBLE:
-    case duckdb::LogicalTypeId::DECIMAL:
+    case duckdb::LogicalTypeId::DECIMAL: {
+      duckdb::Value val = ck->GetValue(i, chunk_row);
       field->store(val.GetValue<double>());
       break;
+    }
     case duckdb::LogicalTypeId::DATE: {
-      duckdb::date_t d = val.GetValue<duckdb::date_t>();
+      auto d = duckdb::FlatVector::GetData<duckdb::date_t>(vec)[chunk_row];
       int32_t year, month, day;
       duckdb::Date::Convert(d, year, month, day);
       MYSQL_TIME mt{};
@@ -4307,8 +4337,13 @@ int ha_duckdb_derived_handler::next_row()
       field->store_time(&mt);
       break;
     }
+    case duckdb::LogicalTypeId::VARCHAR: {
+      auto str = duckdb::FlatVector::GetData<duckdb::string_t>(vec)[chunk_row];
+      field->store(str.GetData(), str.GetSize(), system_charset_info);
+      break;
+    }
     default: {
-      // VARCHAR and other types: use string conversion
+      duckdb::Value val = ck->GetValue(i, chunk_row);
       std::string s = val.ToString();
       field->store(s.c_str(), s.length(), system_charset_info);
       break;
