@@ -3025,20 +3025,46 @@ static select_handler *create_duckdb_select_handler(THD *thd, SELECT_LEX *sel,
       }
     }
   }
-  // If the top-level SELECT has no DuckDB leaf, check subquery tables via
-  // thd->lex->query_tables (covers all levels of the query tree).  This
-  // handles queries like Q20 where the outer FROM is all-InnoDB but subqueries
-  // reference DuckDB tables — without this, the select handler is never
-  // invoked and MariaDB falls back to a catastrophically slow nested-loop.
+  // If the top-level SELECT has no DuckDB leaf, check whether subqueries
+  // contain DuckDB tables via thd->lex->query_tables (covers all levels of
+  // the query tree).  This handles queries like TPC-H Q20 where the outer
+  // FROM is all-InnoDB but subqueries reference DuckDB tables — without this,
+  // MariaDB falls back to a catastrophically slow nested-loop.
+  //
+  // Guard: only walk query_tables when the query actually contains
+  // subqueries.  Without this, "SELECT COUNT(*) FROM innodb_table" gets
+  // claimed by DuckDB, which copies the entire table into a DuckDB temp
+  // table instead of letting the source engine use its fast records() path.
   if (!duckdb_leaf)
   {
-    for (TABLE_LIST *tl= thd->lex->query_tables; tl; tl= tl->next_global)
+    bool has_subqueries= (sel->first_inner_unit() != nullptr);
+    // Also check: if this is the top-level select but the lex has more
+    // SELECT_LEX nodes (e.g. WHERE EXISTS subquery), those won't show
+    // as inner units of sel but will have tables in query_tables.
+    if (!has_subqueries && thd->lex->first_select_lex() == sel)
     {
-      if (tl->table && tl->table->file->ht == duckdb_hton)
+      // Walk query_tables and see if any table belongs to a different
+      // SELECT_LEX — if so, there are subqueries.
+      for (TABLE_LIST *tl= thd->lex->query_tables; tl; tl= tl->next_global)
       {
-        duckdb_leaf= tl;
-        all_duckdb= false;
-        break;
+        if (tl->select_lex && tl->select_lex != sel)
+        {
+          has_subqueries= true;
+          break;
+        }
+      }
+    }
+
+    if (has_subqueries)
+    {
+      for (TABLE_LIST *tl= thd->lex->query_tables; tl; tl= tl->next_global)
+      {
+        if (tl->table && tl->table->file->ht == duckdb_hton)
+        {
+          duckdb_leaf= tl;
+          all_duckdb= false;
+          break;
+        }
       }
     }
   }

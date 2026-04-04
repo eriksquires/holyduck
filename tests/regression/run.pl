@@ -29,6 +29,9 @@ for my $arg (@ARGV) {
 
 my $dbh = DBI->connect(
     "DBI:MariaDB:host=$HOST;port=$PORT", 'root', 'testpass',
+    { RaiseError => 0, PrintError => 0 }
+) || DBI->connect(
+    "DBI:MariaDB:host=$HOST;port=$PORT", 'root', '',
     { RaiseError => 1, PrintError => 0 }
 ) or die "Cannot connect to MariaDB at $HOST:$PORT: " . DBI->errstr . "\n";
 

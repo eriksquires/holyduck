@@ -45,9 +45,16 @@ sub run {
 }
 
 sub connect_db {
-    return DBI->connect(
+    # Try with password first, then without (fresh/reset container)
+    my $dbh = DBI->connect(
         "DBI:MariaDB:host=$DB_HOST;port=$DB_PORT",
         'root', 'testpass',
+        { RaiseError => 0, PrintError => 0 }
+    );
+    return $dbh if $dbh;
+    return DBI->connect(
+        "DBI:MariaDB:host=$DB_HOST;port=$DB_PORT",
+        'root', '',
         { RaiseError => 0, PrintError => 0 }
     );
 }
@@ -238,19 +245,24 @@ run("docker exec $CONTAINER bash -c '"
 # Ensure root can connect from any host (not just localhost).
 # MariaDB may auto-create a root@<docker-ip> entry with no password;
 # that entry wins over root@% by host specificity, so set the password
-# on all root entries.
+# on all root entries.  Try with password first, then without (fresh container).
 run("docker exec $CONTAINER mariadb -uroot -ptestpass --ssl=0 -e \""
+  . "GRANT ALL ON *.* TO 'root'\@'%' IDENTIFIED BY 'testpass'; "
+  . "UPDATE mysql.user SET password=PASSWORD('testpass') WHERE user='root' AND password=''; "
+  . "FLUSH PRIVILEGES;\" 2>/dev/null")
+or run("docker exec $CONTAINER mariadb -uroot --ssl=0 -e \""
   . "GRANT ALL ON *.* TO 'root'\@'%' IDENTIFIED BY 'testpass'; "
   . "UPDATE mysql.user SET password=PASSWORD('testpass') WHERE user='root' AND password=''; "
   . "FLUSH PRIVILEGES;\" 2>/dev/null");
 
 print "Bouncing container...\n";
 run("docker restart $CONTAINER");
+sleep 2;  # let container init settle
 
 my $ready = 0;
 for (1..30) {
-    sleep 1;
     run("docker exec $CONTAINER service mariadb start 2>/dev/null");
+    sleep 1;
     my $dbh = connect_db();
     if ($dbh) {
         my ($ok, undef) = sql($dbh, "SELECT 1");
@@ -259,6 +271,17 @@ for (1..30) {
     }
 }
 fail("MariaDB did not come up after restart") unless $ready;
+
+# Ensure root password is set on all hosts (may be blank after container restart)
+{
+    my $dbh = connect_db();
+    if ($dbh) {
+        $dbh->do("GRANT ALL ON *.* TO 'root'\@'%' IDENTIFIED BY 'testpass'");
+        $dbh->do("UPDATE mysql.user SET password=PASSWORD('testpass') WHERE user='root'");
+        $dbh->do("FLUSH PRIVILEGES");
+        $dbh->disconnect;
+    }
+}
 
 # Install plugin if needed
 {
