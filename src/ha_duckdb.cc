@@ -3243,6 +3243,41 @@ static std::string rewrite_original_sql(const std::string &sql)
   return s;
 }
 
+// Strip any leading DDL/DML prefix so DuckDB only sees the SELECT body.
+// Handles:
+//   CREATE TABLE ... AS SELECT ...   -> "SELECT ..."
+//   CREATE TABLE ... AS WITH cte ... -> "WITH cte ..."
+//   INSERT INTO dst ... SELECT ...   -> "SELECT ..."
+//   INSERT INTO dst ... WITH cte ... -> "WITH cte ..."
+// Works by scanning for the first top-level (paren-depth 0) SELECT or WITH
+// keyword. For pure SELECT/WITH queries the first token matches immediately
+// and sql is returned unchanged.
+static std::string strip_to_top_level_select(const std::string &sql)
+{
+  int depth= 0;
+  size_t n= sql.size();
+  for (size_t i= 0; i < n; i++)
+  {
+    char c= sql[i];
+    if (c == '(') { depth++; continue; }
+    if (c == ')') { if (depth > 0) depth--; continue; }
+    if (depth != 0) continue;
+    // Must be at a word boundary
+    if (i > 0 && (isalnum((unsigned char)sql[i-1]) || sql[i-1] == '_'))
+      continue;
+    auto kw_match= [&](const char *kw, size_t klen) {
+      if (i + klen > n) return false;
+      for (size_t k= 0; k < klen; k++)
+        if (tolower((unsigned char)sql[i+k]) != kw[k]) return false;
+      return (i + klen >= n
+              || !(isalnum((unsigned char)sql[i+klen]) || sql[i+klen] == '_'));
+    };
+    if (kw_match("select", 6) || kw_match("with", 4))
+      return (i == 0) ? sql : sql.substr(i);
+  }
+  return sql;
+}
+
 int ha_duckdb_select_handler::init_scan()
 {
   std::string sql;
@@ -3256,36 +3291,8 @@ int ha_duckdb_select_handler::init_scan()
     size_t qlen= thd->query_length();
     sql.assign(qstr ? qstr : "", qlen);
 
-    // CTAS: thd->query() is the full "CREATE TABLE ... AS SELECT ..." DDL.
-    // Strip everything up to and including the AS keyword so DuckDB only
-    // receives the SELECT (or WITH) portion.
-    {
-      // Scan for " AS " followed by SELECT or WITH (case-insensitive).
-      size_t n= sql.size();
-      for (size_t i= 0; i + 4 < n; i++)
-      {
-        if (tolower((unsigned char)sql[i])   == 'a' &&
-            tolower((unsigned char)sql[i+1]) == 's' &&
-            isspace((unsigned char)sql[i+2]))
-        {
-          size_t j= i + 3;
-          while (j < n && isspace((unsigned char)sql[j])) j++;
-          // Check the next keyword is SELECT or WITH
-          auto starts_with_kw= [&](const char *kw, size_t klen) {
-            if (j + klen > n) return false;
-            for (size_t k= 0; k < klen; k++)
-              if (tolower((unsigned char)sql[j+k]) != kw[k]) return false;
-            // Must be followed by whitespace or end
-            return (j + klen >= n || !isalnum((unsigned char)sql[j+klen]));
-          };
-          if (starts_with_kw("select", 6) || starts_with_kw("with", 4))
-          {
-            sql= sql.substr(j);
-            break;
-          }
-        }
-      }
-    }
+    // Strip CTAS / INSERT..SELECT prefix so DuckDB only sees the SELECT body.
+    sql= strip_to_top_level_select(sql);
 
     sql= rewrite_original_sql(sql);
 
@@ -3314,6 +3321,8 @@ int ha_duckdb_select_handler::init_scan()
       const char *qstr= thd->query();
       size_t      qlen= thd->query_length();
       sql.assign(qstr ? qstr : "", qlen);
+      // Strip CTAS / INSERT..SELECT prefix so DuckDB only sees the body.
+      sql= strip_to_top_level_select(sql);
       for (char &c : sql)
         if (c == '`') c = '"';
       sql= rewrite_original_sql(sql);
@@ -3332,31 +3341,8 @@ int ha_duckdb_select_handler::init_scan()
       size_t      qlen= thd->query_length();
       sql.assign(qstr ? qstr : "", qlen);
 
-      // CTAS: strip "CREATE TABLE ... AS" prefix, keep only the SELECT.
-      {
-        size_t n= sql.size();
-        for (size_t i= 0; i + 4 < n; i++)
-        {
-          if (tolower((unsigned char)sql[i])   == 'a' &&
-              tolower((unsigned char)sql[i+1]) == 's' &&
-              isspace((unsigned char)sql[i+2]))
-          {
-            size_t j= i + 3;
-            while (j < n && isspace((unsigned char)sql[j])) j++;
-            auto starts_with_kw= [&](const char *kw, size_t klen) {
-              if (j + klen > n) return false;
-              for (size_t k= 0; k < klen; k++)
-                if (tolower((unsigned char)sql[j+k]) != kw[k]) return false;
-              return (j + klen >= n || !isalnum((unsigned char)sql[j+klen]));
-            };
-            if (starts_with_kw("select", 6) || starts_with_kw("with", 4))
-            {
-              sql= sql.substr(j);
-              break;
-            }
-          }
-        }
-      }
+      // Strip CTAS / INSERT..SELECT prefix so DuckDB only sees the SELECT body.
+      sql= strip_to_top_level_select(sql);
 
       for (char &c : sql)
         if (c == '`') c = '"';

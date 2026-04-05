@@ -1,0 +1,26 @@
+COUNT(*)	SUM(amount)
+6	1175.00
+order_id	category_id	amount
+1	1	100.00
+2	1	200.00
+3	2	150.00
+4	2	300.00
+5	3	250.00
+6	1	175.00
+oid	amt
+2	200.00
+4	300.00
+5	250.00
+label	dbl
+order-1	200.00
+order-2	400.00
+order-3	300.00
+order-4	600.00
+order-5	500.00
+order-6	350.00
+COUNT(*)
+3
+order_id	amount
+1	100.000
+2	200.000
+3	150.000
