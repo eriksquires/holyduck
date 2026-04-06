@@ -18,7 +18,7 @@
    See THIRD_PARTY_NOTICES.md for full third-party license text.
 */
 
-#define HOLYDUCK_VERSION "0.4.1"
+#define HOLYDUCK_VERSION "0.4.2"
 
 #ifdef USE_PRAGMA_INTERFACE
 #pragma interface

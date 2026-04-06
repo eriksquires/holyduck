@@ -1,5 +1,54 @@
 # Changelog
 
+## v0.4.2 — 2026-04-06
+
+### Bug Fixes
+
+- **Cross-engine INSERT..SELECT** — `INSERT INTO <other-engine> SELECT ... FROM <duckdb-table>`
+  now works correctly. Previously, the select handler sent the full `INSERT` statement to DuckDB
+  instead of just the `SELECT` body, causing either an error (ERROR 1030 "Operation not permitted"
+  when the destination was a non-DuckDB engine like IntensityDB) or a single-row garbage result
+  (when the destination was also DuckDB). Fixed by adding `strip_to_top_level_select()` which
+  finds the first paren-depth-zero `SELECT` or `WITH` keyword and strips everything before it.
+  This also replaces the two duplicate CTAS-specific strip blocks with a single general-purpose
+  implementation. Reported by IntensityDB during cross-engine benchmarks.
+
+### Improvements
+
+- **FlatVector optimization in rnd_next()** — direct `FlatVector::GetData()` access for VARCHAR
+  columns instead of `Value::ToString()`, eliminating per-cell heap allocations in the table-scan
+  path. ~5% throughput improvement on large CTAS operations.
+
+### Build & Automation
+
+- **New release.pl** — Perl release script replacing the stale `release.sh`. Uses the shared
+  `MariaDB::Dev::*` library and `projects.yaml`. Builds all distros using `--mode=build`
+  containers (no MariaDB startup needed during builds).
+
+- **build_and_test.pl wrapper** — thin per-project script that builds inside the container
+  then delegates to the shared `/home/shared/mariadb/scripts/build_and_test.pl --skip-build`
+  for deploy, smoke test, and regression.
+
+- **Archived legacy scripts** — `release.sh`, `build-all.pl`, `fetch-deps.sh` moved to
+  `scripts/archive/` (gitignored). All superseded by shared Perl infrastructure.
+
+### Tests
+
+- **013_insert_select_cross_engine** — new regression test covering DUCKDB→InnoDB (full copy,
+  narrow schema + WHERE, expressions), and DUCKDB→DUCKDB (verifies no spurious Count row).
+
+### Release Artifacts
+
+| File | Description |
+|---|---|
+| `ha_duckdb-v0.4.2-ubuntu.so` | Ubuntu 22.04 (also covers Debian 12) |
+| `ha_duckdb-v0.4.2-oracle8.so` | Oracle Linux 8 |
+| `ha_duckdb-v0.4.2-oracle9.so` | Oracle Linux 9 |
+| `holyduck_duckdb_extensions.sql` | DuckDB macros and views |
+| `holyduck_mariadb_functions.sql` | MariaDB stored functions — install per database as needed |
+
+---
+
 ## v0.4.1 — 2026-04-03
 
 ### Highlights
