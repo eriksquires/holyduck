@@ -2988,6 +2988,10 @@ static std::string rewrite_mariadb_sql(const std::string &sql)
 static std::string extract_missing_table(const std::string &errmsg);
 static TABLE      *find_open_table_by_name(THD *thd, const std::string &name);
 static With_element *find_cte_by_name(THD *thd, const std::string &name);
+static bool inject_table_into_duckdb_impl(duckdb::Connection *conn, TABLE *table,
+                                          const std::string &temp_name,
+                                          const std::vector<Item *> &push_conds= {});
+// Static wrapper used by inject_cte_into_duckdb and derived_handler
 static bool inject_table_into_duckdb(duckdb::Connection *conn, TABLE *table,
                                      const std::string &temp_name,
                                      const std::vector<Item *> &push_conds= {});
@@ -3478,7 +3482,13 @@ int ha_duckdb_select_handler::init_scan()
   return 1;
 }
 
-int ha_duckdb_select_handler::next_row()
+// ---------------------------------------------------------------------------
+// Shared helper: fetch next row from a streaming DuckDB result into
+// table->record[0].  Used by both select_handler and derived_handler
+// to avoid duplicating the chunk-fetch + type-dispatch logic.
+// ---------------------------------------------------------------------------
+int fetch_next_duckdb_row(TABLE *table, void *&duck_result,
+                          void *&duck_chunk, size_t &chunk_row)
 {
   if (!duck_result)
     return HA_ERR_END_OF_FILE;
@@ -3513,13 +3523,11 @@ int ha_duckdb_select_handler::next_row()
   {
     Field *field= table->field[i];
 
-    // Null check via validity mask — avoids constructing a Value object
     auto &vec = ck->data[i];
     auto &validity = duckdb::FlatVector::Validity(vec);
     if (!validity.RowIsValid(chunk_row)) { field->set_null(); continue; }
     field->set_notnull();
 
-    // Type-specific stores — avoids ToString() overhead for numeric/date types
     auto type_id = qr->types[i].id();
     switch (type_id) {
     case duckdb::LogicalTypeId::TINYINT:
@@ -3577,6 +3585,11 @@ int ha_duckdb_select_handler::next_row()
 
   chunk_row++;
   return 0;
+}
+
+int ha_duckdb_select_handler::next_row()
+{
+  return fetch_next_duckdb_row(table, duck_result, duck_chunk, chunk_row);
 }
 
 int ha_duckdb_select_handler::end_scan()
@@ -3745,16 +3758,48 @@ static std::string hash_push_conds(const std::vector<Item *> &conds)
 // Inject an already-open MariaDB TABLE into DuckDB as a TEMP TABLE.
 // duck_name is the name DuckDB will see (typically the MariaDB table_name).
 // Uses CREATE TEMP TABLE IF NOT EXISTS so double-injection is harmless.
-static bool inject_table_into_duckdb(duckdb::Connection *conn,
-                                      TABLE *t,
-                                      const std::string &duck_name,
-                                      const std::vector<Item *> &push_conds)
+// ---------------------------------------------------------------------------
+// Static injection implementation — basic all-columns, all-rows path.
+// Used by inject_cte_into_duckdb and derived_handler.
+// ---------------------------------------------------------------------------
+static void append_row_to_duckdb_basic(duckdb::Appender &appender, TABLE *t)
 {
-  // Cache check: if this table was injected on this connection before with the
-  // same predicate, verify the InnoDB row count hasn't changed.  If both match,
-  // the TEMP TABLE is still valid — skip injection entirely.  If the predicate
-  // differs or the row count changed, evict and re-inject.
+  appender.BeginRow();
+  for (uint i= 0; i < t->s->fields; i++)
+  {
+    Field *f= t->field[i];
+    if (f->is_null()) { appender.Append<nullptr_t>(nullptr); continue; }
+    switch (f->type())
+    {
+      case MYSQL_TYPE_TINY: case MYSQL_TYPE_SHORT:
+      case MYSQL_TYPE_LONG: case MYSQL_TYPE_INT24:
+        appender.Append<int32_t>((int32_t)f->val_int()); break;
+      case MYSQL_TYPE_LONGLONG:
+        appender.Append<int64_t>(f->val_int()); break;
+      case MYSQL_TYPE_FLOAT:
+        appender.Append<float>((float)f->val_real()); break;
+      case MYSQL_TYPE_DOUBLE:
+        appender.Append<double>(f->val_real()); break;
+      default:
+      {
+        String sv;
+        f->val_str(&sv, &sv);
+        appender.Append(duckdb::Value(std::string(sv.ptr(), sv.length())));
+        break;
+      }
+    }
+  }
+  appender.EndRow();
+}
+
+static bool inject_table_into_duckdb_impl(
+    duckdb::Connection *conn, TABLE *t,
+    const std::string &duck_name,
+    const std::vector<Item *> &push_conds)
+{
   const std::string pred_hash= hash_push_conds(push_conds);
+
+  // Cache check
   {
     mysql_mutex_lock(&g_duckdb_mutex);
     auto conn_it= g_injected_cache.find(conn);
@@ -3775,13 +3820,10 @@ static bool inject_table_into_duckdb(duckdb::Connection *conn,
     {
       if (cached_entry.pred_hash == pred_hash)
       {
-        // Same predicate — check InnoDB row count.
         t->file->info(HA_STATUS_VARIABLE);
-        ha_rows current_records= t->file->stats.records;
-        if (current_records == cached_entry.rows)
-          return true;  // Cache hit: same predicate, table unchanged.
+        if (t->file->stats.records == cached_entry.rows)
+          return true;
       }
-      // Predicate changed or row count changed — evict; fall through to re-inject.
       mysql_mutex_lock(&g_duckdb_mutex);
       auto it= g_injected_cache.find(conn);
       if (it != g_injected_cache.end())
@@ -3790,17 +3832,13 @@ static bool inject_table_into_duckdb(duckdb::Connection *conn,
     }
   }
 
-  // ---------------------------------------------------------------------------
-  // Unfiltered injections: use/create the server-wide shared table and attach
-  // a per-session TEMP VIEW so the query SQL sees the expected duck_name.
-  // ---------------------------------------------------------------------------
+  // Unfiltered: shared table + per-session view
   if (pred_hash.empty())
   {
     const std::string qual_name= std::string(t->s->db.str) + "." +
                                  t->s->table_name.str;
     const std::string sname= shared_inj_name(duck_name);
 
-    // Check whether a valid shared table already exists.
     bool shared_valid= false;
     {
       mysql_mutex_lock(&g_duckdb_mutex);
@@ -3811,14 +3849,13 @@ static bool inject_table_into_duckdb(duckdb::Connection *conn,
         if (t->file->stats.records == sit->second.rows)
           shared_valid= true;
         else
-          g_shared_inj.erase(sit);  // stale — will re-inject below
+          g_shared_inj.erase(sit);
       }
       mysql_mutex_unlock(&g_duckdb_mutex);
     }
 
     if (!shared_valid)
     {
-      // Build CREATE OR REPLACE TABLE (regular, shared across connections).
       std::ostringstream cr;
       cr << "CREATE OR REPLACE TABLE \"" << sname << "\" (";
       for (uint i= 0; i < t->s->fields; i++)
@@ -3832,13 +3869,10 @@ static bool inject_table_into_duckdb(duckdb::Connection *conn,
       if (res->HasError())
       {
         sql_print_warning("DuckDB: shared inject CREATE failed for '%s': %s",
-                          sname.c_str(),
-                          res->GetErrorObject().Message().c_str());
-        // Fall through to per-session TEMP TABLE path below.
+                          sname.c_str(), res->GetErrorObject().Message().c_str());
         goto per_session_inject;
       }
 
-      // Fill the shared table.
       MY_BITMAP *saved= t->read_set;
       t->read_set= &t->s->all_set;
       bool inj_ok= true;
@@ -3848,34 +3882,7 @@ static bool inject_table_into_duckdb(duckdb::Connection *conn,
         if (t->file->ha_rnd_init(1) != 0) { t->read_set= saved; goto per_session_inject; }
         int rc;
         while ((rc= t->file->ha_rnd_next(t->record[0])) == 0)
-        {
-          appender.BeginRow();
-          for (uint i= 0; i < t->s->fields; i++)
-          {
-            Field *f= t->field[i];
-            if (f->is_null()) { appender.Append<nullptr_t>(nullptr); continue; }
-            switch (f->type())
-            {
-              case MYSQL_TYPE_TINY: case MYSQL_TYPE_SHORT:
-              case MYSQL_TYPE_LONG: case MYSQL_TYPE_INT24:
-                appender.Append<int32_t>((int32_t)f->val_int()); break;
-              case MYSQL_TYPE_LONGLONG:
-                appender.Append<int64_t>(f->val_int()); break;
-              case MYSQL_TYPE_FLOAT:
-                appender.Append<float>((float)f->val_real()); break;
-              case MYSQL_TYPE_DOUBLE:
-                appender.Append<double>(f->val_real()); break;
-              default:
-              {
-                String sv;
-                f->val_str(&sv, &sv);
-                appender.Append(duckdb::Value(std::string(sv.ptr(), sv.length())));
-                break;
-              }
-            }
-          }
-          appender.EndRow();
-        }
+          append_row_to_duckdb_basic(appender, t);
         t->file->ha_rnd_end();
         appender.Close();
       }
@@ -3896,7 +3903,6 @@ static bool inject_table_into_duckdb(duckdb::Connection *conn,
       mysql_mutex_unlock(&g_duckdb_mutex);
     }
 
-    // Attach a per-session TEMP VIEW so the query sees duck_name.
     conn->Query("DROP VIEW IF EXISTS \"" + duck_name + "\"");
     {
       auto vr= conn->Query("CREATE TEMP VIEW \"" + duck_name +
@@ -3909,7 +3915,265 @@ static bool inject_table_into_duckdb(duckdb::Connection *conn,
         mysql_mutex_unlock(&g_duckdb_mutex);
         return true;
       }
-      // View creation failed — fall through to per-session TEMP TABLE.
+    }
+  }
+
+per_session_inject:
+  conn->Query("DROP TABLE IF EXISTS \"" + duck_name + "\"");
+
+  std::ostringstream create_sql;
+  create_sql << "CREATE TEMP TABLE \"" << duck_name << "\" (";
+  for (uint i = 0; i < t->s->fields; i++)
+  {
+    if (i > 0) create_sql << ", ";
+    create_sql << '"' << t->field[i]->field_name.str << "\" "
+               << field_type_to_duckdb(t->field[i]);
+  }
+  create_sql << ")";
+
+  auto cr = conn->Query(create_sql.str());
+  if (cr->HasError())
+  {
+    sql_print_warning("DuckDB: inject_table CREATE failed for '%s': %s",
+                      duck_name.c_str(), cr->GetErrorObject().Message().c_str());
+    return false;
+  }
+
+  MY_BITMAP *saved_read_set = t->read_set;
+  t->read_set = &t->s->all_set;
+
+  bool ok = true;
+  try
+  {
+    duckdb::Appender appender(*conn, duck_name);
+    if (t->file->ha_rnd_init(1) != 0) { t->read_set = saved_read_set; return false; }
+    int rc;
+    while ((rc = t->file->ha_rnd_next(t->record[0])) == 0)
+    {
+      if (!push_conds.empty())
+      {
+        bool pass= true;
+        for (Item *pred : push_conds)
+          if (!pred->val_int()) { pass= false; break; }
+        if (!pass) continue;
+      }
+      append_row_to_duckdb_basic(appender, t);
+    }
+    t->file->ha_rnd_end();
+    appender.Close();
+  }
+  catch (const std::exception &e)
+  {
+    sql_print_warning("DuckDB: inject_table Appender failed for '%s': %s",
+                      duck_name.c_str(), e.what());
+    t->file->ha_rnd_end();
+    ok = false;
+  }
+  t->read_set = saved_read_set;
+
+  if (ok)
+  {
+    t->file->info(HA_STATUS_VARIABLE);
+    mysql_mutex_lock(&g_duckdb_mutex);
+    g_injected_cache[conn][duck_name]= InjCacheEntry{pred_hash, t->file->stats.records};
+    mysql_mutex_unlock(&g_duckdb_mutex);
+  }
+  return ok;
+}
+
+// ---------------------------------------------------------------------------
+// Injection sub-methods (virtual on ha_duckdb_select_handler)
+// ---------------------------------------------------------------------------
+
+// --- inject_table_into_duckdb sub-methods ---
+
+bool ha_duckdb_select_handler::check_injection_cache(
+    duckdb::Connection *conn, const std::string &duck_name,
+    const std::string &pred_hash, TABLE *t)
+{
+  mysql_mutex_lock(&g_duckdb_mutex);
+  auto conn_it= g_injected_cache.find(conn);
+  bool have_entry= false;
+  InjCacheEntry cached_entry{};
+  if (conn_it != g_injected_cache.end())
+  {
+    auto tbl_it= conn_it->second.find(duck_name);
+    if (tbl_it != conn_it->second.end())
+    {
+      have_entry= true;
+      cached_entry= tbl_it->second;
+    }
+  }
+  mysql_mutex_unlock(&g_duckdb_mutex);
+
+  if (!have_entry)
+    return false;
+
+  if (cached_entry.pred_hash == pred_hash)
+  {
+    t->file->info(HA_STATUS_VARIABLE);
+    if (t->file->stats.records == cached_entry.rows)
+      return true;  // Cache hit
+  }
+  // Evict stale entry
+  mysql_mutex_lock(&g_duckdb_mutex);
+  auto it= g_injected_cache.find(conn);
+  if (it != g_injected_cache.end())
+    it->second.erase(duck_name);
+  mysql_mutex_unlock(&g_duckdb_mutex);
+  return false;
+}
+
+void ha_duckdb_select_handler::prepare_injection_read_set(TABLE *t)
+{
+  t->read_set= &t->s->all_set;
+}
+
+void ha_duckdb_select_handler::restore_injection_read_set(TABLE *t, void *saved)
+{
+  t->read_set= static_cast<MY_BITMAP *>(saved);
+}
+
+bool ha_duckdb_select_handler::evaluate_injection_predicates(
+    const std::vector<Item *> &push_conds)
+{
+  for (Item *pred : push_conds)
+    if (!pred->val_int()) return false;
+  return true;
+}
+
+void ha_duckdb_select_handler::append_row_to_duckdb(void *appender_ptr, TABLE *t)
+{
+  auto &appender= *static_cast<duckdb::Appender *>(appender_ptr);
+  appender.BeginRow();
+  for (uint i= 0; i < t->s->fields; i++)
+  {
+    Field *f= t->field[i];
+    if (f->is_null()) { appender.Append<nullptr_t>(nullptr); continue; }
+    switch (f->type())
+    {
+      case MYSQL_TYPE_TINY: case MYSQL_TYPE_SHORT:
+      case MYSQL_TYPE_LONG: case MYSQL_TYPE_INT24:
+        appender.Append<int32_t>((int32_t)f->val_int()); break;
+      case MYSQL_TYPE_LONGLONG:
+        appender.Append<int64_t>(f->val_int()); break;
+      case MYSQL_TYPE_FLOAT:
+        appender.Append<float>((float)f->val_real()); break;
+      case MYSQL_TYPE_DOUBLE:
+        appender.Append<double>(f->val_real()); break;
+      default:
+      {
+        String sv;
+        f->val_str(&sv, &sv);
+        appender.Append(duckdb::Value(std::string(sv.ptr(), sv.length())));
+        break;
+      }
+    }
+  }
+  appender.EndRow();
+}
+
+bool ha_duckdb_select_handler::inject_table_into_duckdb(
+    duckdb::Connection *conn, TABLE *t,
+    const std::string &duck_name,
+    const std::vector<Item *> &push_conds)
+{
+  const std::string pred_hash= hash_push_conds(push_conds);
+
+  if (check_injection_cache(conn, duck_name, pred_hash, t))
+    return true;
+
+  // ---------------------------------------------------------------------------
+  // Unfiltered injections: use/create the server-wide shared table and attach
+  // a per-session TEMP VIEW so the query SQL sees the expected duck_name.
+  // ---------------------------------------------------------------------------
+  if (pred_hash.empty())
+  {
+    const std::string qual_name= std::string(t->s->db.str) + "." +
+                                 t->s->table_name.str;
+    const std::string sname= shared_inj_name(duck_name);
+
+    bool shared_valid= false;
+    {
+      mysql_mutex_lock(&g_duckdb_mutex);
+      auto sit= g_shared_inj.find(qual_name);
+      if (sit != g_shared_inj.end())
+      {
+        t->file->info(HA_STATUS_VARIABLE);
+        if (t->file->stats.records == sit->second.rows)
+          shared_valid= true;
+        else
+          g_shared_inj.erase(sit);
+      }
+      mysql_mutex_unlock(&g_duckdb_mutex);
+    }
+
+    if (!shared_valid)
+    {
+      std::ostringstream cr;
+      cr << "CREATE OR REPLACE TABLE \"" << sname << "\" (";
+      for (uint i= 0; i < t->s->fields; i++)
+      {
+        if (i > 0) cr << ", ";
+        cr << '"' << t->field[i]->field_name.str << "\" "
+           << field_type_to_duckdb(t->field[i]);
+      }
+      cr << ")";
+      auto res= conn->Query(cr.str());
+      if (res->HasError())
+      {
+        sql_print_warning("DuckDB: shared inject CREATE failed for '%s': %s",
+                          sname.c_str(),
+                          res->GetErrorObject().Message().c_str());
+        goto per_session_inject;
+      }
+
+      MY_BITMAP *saved= t->read_set;
+      prepare_injection_read_set(t);
+      bool inj_ok= true;
+      try
+      {
+        duckdb::Appender appender(*conn, sname);
+        if (t->file->ha_rnd_init(1) != 0)
+        {
+          restore_injection_read_set(t, saved);
+          goto per_session_inject;
+        }
+        int rc;
+        while ((rc= t->file->ha_rnd_next(t->record[0])) == 0)
+          append_row_to_duckdb(&appender, t);
+        t->file->ha_rnd_end();
+        appender.Close();
+      }
+      catch (const std::exception &e)
+      {
+        sql_print_warning("DuckDB: shared inject Appender failed for '%s': %s",
+                          sname.c_str(), e.what());
+        t->file->ha_rnd_end();
+        inj_ok= false;
+      }
+      restore_injection_read_set(t, saved);
+
+      if (!inj_ok) goto per_session_inject;
+
+      t->file->info(HA_STATUS_VARIABLE);
+      mysql_mutex_lock(&g_duckdb_mutex);
+      g_shared_inj[qual_name]= SharedInjEntry{sname, t->file->stats.records};
+      mysql_mutex_unlock(&g_duckdb_mutex);
+    }
+
+    conn->Query("DROP VIEW IF EXISTS \"" + duck_name + "\"");
+    {
+      auto vr= conn->Query("CREATE TEMP VIEW \"" + duck_name +
+                           "\" AS SELECT * FROM \"" + sname + "\"");
+      if (!vr->HasError())
+      {
+        t->file->info(HA_STATUS_VARIABLE);
+        mysql_mutex_lock(&g_duckdb_mutex);
+        g_injected_cache[conn][duck_name]= InjCacheEntry{pred_hash, t->file->stats.records};
+        mysql_mutex_unlock(&g_duckdb_mutex);
+        return true;
+      }
     }
   }
 
@@ -3917,13 +4181,8 @@ per_session_inject:
   // ---------------------------------------------------------------------------
   // Per-session TEMP TABLE path: filtered injections, or shared-cache fallback.
   // ---------------------------------------------------------------------------
-
-  // Drop any pre-existing TEMP TABLE for this name.  With a persistent per-THD
-  // connection a previous query may have left a filtered (partial) copy; we
-  // need a clean slate before injecting (possibly with different predicates).
   conn->Query("DROP TABLE IF EXISTS \"" + duck_name + "\"");
 
-  // Build CREATE TEMP TABLE with the same schema as the MariaDB table
   std::ostringstream create_sql;
   create_sql << "CREATE TEMP TABLE \"" << duck_name << "\" (";
   for (uint i = 0; i < t->s->fields; i++)
@@ -3943,9 +4202,8 @@ per_session_inject:
     return false;
   }
 
-  // Temporarily enable all-column reads so val_int/val_str work for every field
   MY_BITMAP *saved_read_set = t->read_set;
-  t->read_set = &t->s->all_set;
+  prepare_injection_read_set(t);
 
   bool ok = true;
   try
@@ -3954,57 +4212,16 @@ per_session_inject:
 
     if (t->file->ha_rnd_init(1) != 0)
     {
-      t->read_set = saved_read_set;
+      restore_injection_read_set(t, saved_read_set);
       return false;
     }
 
     int rc;
     while ((rc = t->file->ha_rnd_next(t->record[0])) == 0)
     {
-      // Evaluate pushed-down single-table predicates; skip non-matching rows.
-      if (!push_conds.empty())
-      {
-        bool pass= true;
-        for (Item *pred : push_conds)
-          if (!pred->val_int()) { pass= false; break; }
-        if (!pass) continue;
-      }
-      appender.BeginRow();
-      for (uint i = 0; i < t->s->fields; i++)
-      {
-        Field *f = t->field[i];
-        if (f->is_null())
-        {
-          appender.Append<nullptr_t>(nullptr);
-          continue;
-        }
-        switch (f->type())
-        {
-          case MYSQL_TYPE_TINY:
-          case MYSQL_TYPE_SHORT:
-          case MYSQL_TYPE_LONG:
-          case MYSQL_TYPE_INT24:
-            appender.Append<int32_t>((int32_t)f->val_int());
-            break;
-          case MYSQL_TYPE_LONGLONG:
-            appender.Append<int64_t>(f->val_int());
-            break;
-          case MYSQL_TYPE_FLOAT:
-            appender.Append<float>((float)f->val_real());
-            break;
-          case MYSQL_TYPE_DOUBLE:
-            appender.Append<double>(f->val_real());
-            break;
-          default:
-          {
-            String sv;
-            f->val_str(&sv, &sv);
-            appender.Append(duckdb::Value(std::string(sv.ptr(), sv.length())));
-            break;
-          }
-        }
-      }
-      appender.EndRow();
+      if (!push_conds.empty() && !evaluate_injection_predicates(push_conds))
+        continue;
+      append_row_to_duckdb(&appender, t);
     }
     t->file->ha_rnd_end();
     appender.Close();
@@ -4017,10 +4234,8 @@ per_session_inject:
     ok = false;
   }
 
-  t->read_set = saved_read_set;
+  restore_injection_read_set(t, saved_read_set);
 
-  // Cache all successful injections (filtered or unfiltered).  Store the
-  // predicate hash and InnoDB row count so future lookups can validate both.
   if (ok)
   {
     t->file->info(HA_STATUS_VARIABLE);
@@ -4030,6 +4245,17 @@ per_session_inject:
   }
 
   return ok;
+}
+
+// Static wrapper for callers without a select_handler instance (derived_handler,
+// inject_cte_into_duckdb).  Uses the basic injection path (all columns, all rows,
+// MariaDB-side predicate eval).  The virtual method on select_handler delegates
+// to its own (overridable) sub-methods for the same steps.
+static bool inject_table_into_duckdb(duckdb::Connection *conn, TABLE *t,
+                                      const std::string &duck_name,
+                                      const std::vector<Item *> &push_conds)
+{
+  return inject_table_into_duckdb_impl(conn, t, duck_name, push_conds);
 }
 
 // Inject a CTE into DuckDB as a TEMP TABLE.
@@ -4279,98 +4505,7 @@ int ha_duckdb_derived_handler::init_scan()
 
 int ha_duckdb_derived_handler::next_row()
 {
-  if (!duck_result)
-    return HA_ERR_END_OF_FILE;
-
-  auto *qr = static_cast<duckdb::QueryResult*>(duck_result);
-  auto *ck = static_cast<duckdb::DataChunk*>(duck_chunk);
-
-  while (!ck || chunk_row >= ck->size())
-  {
-    try {
-      delete ck;
-      auto fetched = qr->Fetch();
-      ck = fetched.release();
-      duck_chunk = ck;
-    } catch (...) {
-      duck_chunk = nullptr;
-      return HA_ERR_END_OF_FILE;
-    }
-    if (!ck || ck->size() == 0) {
-      duck_chunk = nullptr;
-      return HA_ERR_END_OF_FILE;
-    }
-    ck->Flatten();
-    chunk_row = 0;
-  }
-
-  memset(table->record[0], 0, table->s->null_bytes);
-
-  for (uint i= 0; i < table->s->fields && i < ck->ColumnCount(); i++)
-  {
-    Field *field= table->field[i];
-
-    auto &vec = ck->data[i];
-    auto &validity = duckdb::FlatVector::Validity(vec);
-    if (!validity.RowIsValid(chunk_row)) { field->set_null(); continue; }
-    field->set_notnull();
-
-    auto type_id = qr->types[i].id();
-    switch (type_id) {
-    case duckdb::LogicalTypeId::TINYINT:
-      field->store(duckdb::FlatVector::GetData<int8_t>(vec)[chunk_row], false);
-      break;
-    case duckdb::LogicalTypeId::SMALLINT:
-      field->store(duckdb::FlatVector::GetData<int16_t>(vec)[chunk_row], false);
-      break;
-    case duckdb::LogicalTypeId::INTEGER:
-      field->store(duckdb::FlatVector::GetData<int32_t>(vec)[chunk_row], false);
-      break;
-    case duckdb::LogicalTypeId::BIGINT:
-      field->store(duckdb::FlatVector::GetData<int64_t>(vec)[chunk_row], false);
-      break;
-    case duckdb::LogicalTypeId::UTINYINT:
-    case duckdb::LogicalTypeId::USMALLINT:
-    case duckdb::LogicalTypeId::UINTEGER:
-    case duckdb::LogicalTypeId::UBIGINT: {
-      duckdb::Value val = ck->GetValue(i, chunk_row);
-      field->store(val.GetValue<uint64_t>(), true);
-      break;
-    }
-    case duckdb::LogicalTypeId::FLOAT:
-      field->store(duckdb::FlatVector::GetData<float>(vec)[chunk_row]);
-      break;
-    case duckdb::LogicalTypeId::DOUBLE:
-    case duckdb::LogicalTypeId::DECIMAL: {
-      duckdb::Value val = ck->GetValue(i, chunk_row);
-      field->store(val.GetValue<double>());
-      break;
-    }
-    case duckdb::LogicalTypeId::DATE: {
-      auto d = duckdb::FlatVector::GetData<duckdb::date_t>(vec)[chunk_row];
-      int32_t year, month, day;
-      duckdb::Date::Convert(d, year, month, day);
-      MYSQL_TIME mt{};
-      mt.year = year; mt.month = month; mt.day = day;
-      mt.time_type = MYSQL_TIMESTAMP_DATE;
-      field->store_time(&mt);
-      break;
-    }
-    case duckdb::LogicalTypeId::VARCHAR: {
-      auto str = duckdb::FlatVector::GetData<duckdb::string_t>(vec)[chunk_row];
-      field->store(str.GetData(), str.GetSize(), system_charset_info);
-      break;
-    }
-    default: {
-      duckdb::Value val = ck->GetValue(i, chunk_row);
-      std::string s = val.ToString();
-      field->store(s.c_str(), s.length(), system_charset_info);
-      break;
-    }
-    }
-  }
-  chunk_row++;
-  return 0;
+  return fetch_next_duckdb_row(table, duck_result, duck_chunk, chunk_row);
 }
 
 int ha_duckdb_derived_handler::end_scan()

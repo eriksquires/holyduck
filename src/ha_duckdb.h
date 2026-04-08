@@ -209,11 +209,40 @@ public:
 */
 class ha_duckdb_select_handler : public select_handler
 {
+protected:
   duckdb::Connection *connection;
   void *duck_result;    // duckdb::QueryResult* (streaming)
   void *duck_chunk;     // duckdb::DataChunk* (current chunk, owned)
   size_t chunk_row;
   bool use_original_sql;   // true when all leaf tables are DUCKDB engine
+
+  // --- Overridable sub-steps of inject_table_into_duckdb ---
+
+  // Check whether a previous injection is still valid (cache hit).
+  virtual bool check_injection_cache(duckdb::Connection *conn,
+                                     const std::string &duck_name,
+                                     const std::string &pred_hash,
+                                     TABLE *t);
+
+  // Set read_set on the source table before scanning.
+  // Default: all columns. Override for column masking.
+  virtual void prepare_injection_read_set(TABLE *t);
+
+  // Restore read_set after scanning.
+  virtual void restore_injection_read_set(TABLE *t, void *saved);
+
+  // Evaluate pushed-down predicates for a single row during injection.
+  // Return true if the row passes all predicates.
+  virtual bool evaluate_injection_predicates(
+      const std::vector<Item *> &push_conds);
+
+  // Append a single row from the source table to a DuckDB Appender.
+  virtual void append_row_to_duckdb(void *appender_ptr, TABLE *t);
+
+  // Full table injection: scan source table and copy into DuckDB.
+  virtual bool inject_table_into_duckdb(duckdb::Connection *conn, TABLE *t,
+                                         const std::string &duck_name,
+                                         const std::vector<Item *> &push_conds= {});
 
 public:
   ha_duckdb_select_handler(THD *thd, SELECT_LEX *sel,
@@ -237,6 +266,7 @@ public:
 */
 class ha_duckdb_derived_handler : public derived_handler
 {
+protected:
   duckdb::Connection *connection;
   void *duck_result;    // duckdb::QueryResult* (streaming)
   void *duck_chunk;     // duckdb::DataChunk* (current chunk, owned)
@@ -250,5 +280,11 @@ public:
   int next_row()  override;
   int end_scan()  override;
 };
+
+// Shared helper: fetch next row from a streaming DuckDB result into
+// table->record[0].  Used by both select_handler and derived_handler.
+// Returns 0 on success, HA_ERR_END_OF_FILE when exhausted.
+int fetch_next_duckdb_row(TABLE *table, void *&duck_result,
+                          void *&duck_chunk, size_t &chunk_row);
 
 #endif /* HA_DUCKDB_INCLUDED */
